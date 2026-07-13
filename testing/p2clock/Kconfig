@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config TESTING_P2CLOCK
+	tristate "Propeller 2 raw-counter calibration endpoint"
+	default n
+	depends on ARCH_P2 && BUILD_FLAT && UART0_SERIAL_CONSOLE
+	---help---
+		Enable a direct-init endpoint that captures raw GETCT values only in
+		response to framed host requests.  Independent host monotonic time,
+		not the target scheduler tick, qualifies clock frequency and drift.
+
+if TESTING_P2CLOCK
+
+config TESTING_P2CLOCK_PROGNAME
+	string "Program name"
+	default "p2clock"
+
+endif

@@ -1,0 +1,9 @@
+############################################################################
+# apps/testing/p2clock/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_TESTING_P2CLOCK),)
+CONFIGURED_APPS += $(APPDIR)/testing/p2clock
+endif
