@@ -10,6 +10,7 @@ config TESTING_P2STORAGE
 	depends on P2_EC32MB_STORAGE_BINDINGS
 	depends on MTD_SMART && FS_SMARTFS
 	depends on MMCSD_SPI && FS_FAT
+	depends on BCH && !DISABLE_PSEUDOFS_OPERATIONS
 	depends on !DISABLE_MOUNTPOINT
 	---help---
 		Enable a command-driven test for the protected onboard SMART flash
