@@ -71,6 +71,7 @@
 
 #define P2SMART_GPIO_SAMPLE_COUNT  8
 #define P2SMART_PAYLOAD_SIZE       16
+#define P2SMART_SPI_FREQUENCY      100000u
 
 /****************************************************************************
  * Private Data
@@ -709,7 +710,13 @@ static int p2smart_spi_test(void)
   int fd;
   int ret;
 
-  printf("P2SMART:SPI:BEGIN=6-7\n");
+  printf("P2SMART:SPI:BEGIN=MOSI=%d:MISO=%d:SCK=%d:CS=%d:"
+         "MODE=0:REQUEST_HZ=%u\n",
+         CONFIG_P2_EC32MB_SPI_MOSI_PIN,
+         CONFIG_P2_EC32MB_SPI_MISO_PIN,
+         CONFIG_P2_EC32MB_SPI_SCK_PIN,
+         CONFIG_P2_EC32MB_SPI_CS_PIN,
+         P2SMART_SPI_FREQUENCY);
   fd = open(CONFIG_TESTING_P2SMARTPINS_SPI_DEVPATH, O_RDONLY);
   if (fd < 0)
     {
@@ -727,7 +734,7 @@ static int p2smart_spi_test(void)
   sequence.mode = SPIDEV_MODE0;
   sequence.nbits = 8;
   sequence.ntrans = 1;
-  sequence.frequency = 100000;
+  sequence.frequency = P2SMART_SPI_FREQUENCY;
   sequence.trans = &transaction;
 
   ret = ioctl(fd, SPIIOC_TRANSFER,
@@ -753,7 +760,11 @@ static int p2smart_spi_test(void)
       return -EIO;
     }
 
-  printf("P2SMART:SPI:SAFE=FLOAT\n");
+  printf("P2SMART:SPI:SAFE=MOSI%d,MISO%d,SCK%d,CS%d=FLOAT\n",
+         CONFIG_P2_EC32MB_SPI_MOSI_PIN,
+         CONFIG_P2_EC32MB_SPI_MISO_PIN,
+         CONFIG_P2_EC32MB_SPI_SCK_PIN,
+         CONFIG_P2_EC32MB_SPI_CS_PIN);
   printf("P2SMART:SPI:PASS\n");
   return OK;
 }

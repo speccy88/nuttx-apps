@@ -57,6 +57,8 @@
 #define P2STORAGE_RECORD_DATA_SIZE  252
 #define P2STORAGE_INTERRUPT_SIZE    128
 #define P2STORAGE_FULL_CHUNK_SIZE   4096
+#define P2STORAGE_FULL_FSYNC_SIZE   (64 * 1024)
+#define P2STORAGE_FULL_PROGRESS_SIZE (1024 * 1024)
 #define P2STORAGE_STREAM_SIZE       CONFIG_TESTING_P2STORAGE_STREAM_SIZE
 
 #define P2STORAGE_FLASH_FILE        "p2record.bin"
@@ -1099,6 +1101,8 @@ static int p2storage_flash_full(uint32_t sequence)
   struct stat file_stat;
   char path[PATH_MAX];
   uintmax_t total = 0;
+  uintmax_t next_progress = P2STORAGE_FULL_PROGRESS_SIZE;
+  size_t unsynced = 0;
   uint32_t chunk = 0;
   uint32_t checksum;
   bool full = false;
@@ -1169,14 +1173,43 @@ static int p2storage_flash_full(uint32_t sequence)
 
       chunk++;
       total += (uintmax_t)nwritten;
-      if (fsync(fd) < 0)
+      unsynced += (size_t)nwritten;
+
+      while (total >= next_progress)
         {
-          if (errno == ENOSPC)
+          printf("P2STORAGE:FLASH:FULL:PROGRESS:SEQUENCE=%08" PRIX32
+                 ":BYTES=%" PRIuMAX "\n",
+                 sequence, next_progress);
+          next_progress += P2STORAGE_FULL_PROGRESS_SIZE;
+        }
+
+      if (unsynced >= P2STORAGE_FULL_FSYNC_SIZE ||
+          (size_t)nwritten != sizeof(g_io_buffer))
+        {
+          if (fsync(fd) < 0)
             {
-              full = true;
-              break;
+              if (errno == ENOSPC)
+                {
+                  full = true;
+                  break;
+                }
+
+              ret = p2storage_errno();
+              goto out;
             }
 
+          unsynced = 0;
+        }
+    }
+
+  if (!full && unsynced > 0 && fsync(fd) < 0)
+    {
+      if (errno == ENOSPC)
+        {
+          full = true;
+        }
+      else
+        {
           ret = p2storage_errno();
           goto out;
         }

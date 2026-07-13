@@ -99,12 +99,12 @@ config TESTING_P2SMARTPINS_DAC_FULL_SCALE
 config TESTING_P2SMARTPINS_SPI
 	bool "Test P6 SPI MOSI to P7 MISO"
 	default n
-	depends on SPI_DRIVER && SPI_EXCHANGE
+	depends on P2_EC32MB_SPI && SPI_DRIVER && SPI_EXCHANGE
 	---help---
 		Exchange a deterministic 16-byte record through the standard SPI test
 		character driver.  P7 must be configured as MISO before P6 is enabled
-		as MOSI.  Clock and chip select are separate controller pins and are
-		not part of the P6-P7 link.
+		as MOSI.  P8 clock and P9 chip select are deliberately unconnected
+		controller outputs and are not part of the P6-P7 link.
 
 config TESTING_P2SMARTPINS_SPI_DEVPATH
 	string "General-purpose SPI character device"
