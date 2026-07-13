@@ -63,11 +63,12 @@
 
 #define P2STORAGE_FLASH_FILE        "p2record.bin"
 #define P2STORAGE_SD_FILE           "p2record.bin"
-#define P2STORAGE_RENAME_SOURCE     "p2rename.tmp"
-#define P2STORAGE_RENAME_DEST       "p2renamed.bin"
+#define P2STORAGE_RENAME_DIR        "p2dir"
+#define P2STORAGE_RENAME_SOURCE     "p2dir/source.tmp"
+#define P2STORAGE_RENAME_DEST       "p2dir/renamed.bin"
 #define P2STORAGE_FLASH_FULL_FILE   "p2full.bin"
 #define P2STORAGE_INTERRUPT_FILE    "p2interrupt.tmp"
-#define P2STORAGE_SCRATCH_FILE      "p2scratch.bin"
+#define P2STORAGE_SCRATCH_FILE      "p2scrtch.bin"
 
 #if CONFIG_TESTING_P2STORAGE_RECORD_SIZE != 256
 #  error "The strict P2 storage protocol requires 256-byte records"
@@ -735,18 +736,26 @@ static int p2storage_probe(void)
 static int p2storage_verify_persistence(
   FAR const struct p2storage_medium_s *medium, uint32_t sequence)
 {
+  bool premounted = false;
   uint32_t checksum;
   int ret;
   int unmount_ret;
 
-  ret = p2storage_mount(medium);
-  if (ret < 0)
+#ifdef CONFIG_TESTING_P2STORAGE_FLASH_PREMOUNTED
+  premounted = medium == &g_flash;
+#endif
+
+  if (!premounted)
     {
-      return ret;
+      ret = p2storage_mount(medium);
+      if (ret < 0)
+        {
+          return ret;
+        }
     }
 
   ret = p2storage_verify_stream(medium, sequence, &checksum);
-  unmount_ret = p2storage_unmount(medium);
+  unmount_ret = premounted ? 0 : p2storage_unmount(medium);
   if (ret == 0)
     {
       ret = unmount_ret;
@@ -897,10 +906,18 @@ static int p2storage_write(FAR const struct p2storage_medium_s *medium,
 static int p2storage_sd_rename_delete(uint32_t sequence, bool markers,
                                       FAR uint32_t *checksum)
 {
+  char directory[PATH_MAX];
   char source[PATH_MAX];
   char destination[PATH_MAX];
   int ret;
   int unmount_ret;
+
+  ret = p2storage_make_path(directory, sizeof(directory), &g_sd,
+                            P2STORAGE_RENAME_DIR);
+  if (ret < 0)
+    {
+      return ret;
+    }
 
   ret = p2storage_make_path(source, sizeof(source), &g_sd,
                             P2STORAGE_RENAME_SOURCE);
@@ -932,6 +949,24 @@ static int p2storage_sd_rename_delete(uint32_t sequence, bool markers,
     {
       ret = p2storage_errno();
       goto out;
+    }
+
+  if (rmdir(directory) < 0 && errno != ENOENT)
+    {
+      ret = p2storage_errno();
+      goto out;
+    }
+
+  if (mkdir(directory, 0777) < 0)
+    {
+      ret = p2storage_errno();
+      goto out;
+    }
+
+  if (markers)
+    {
+      printf("P2STORAGE:SD:MKDIR:SEQUENCE=%08" PRIX32 ":PASS\n",
+             sequence);
     }
 
   ret = p2storage_write_record(&g_sd, P2STORAGE_RENAME_SOURCE,
@@ -975,6 +1010,12 @@ static int p2storage_sd_rename_delete(uint32_t sequence, bool markers,
   if (access(destination, F_OK) == 0 || errno != ENOENT)
     {
       ret = -EEXIST;
+      goto out;
+    }
+
+  if (rmdir(directory) < 0)
+    {
+      ret = p2storage_errno();
       goto out;
     }
 

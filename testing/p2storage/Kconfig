@@ -72,6 +72,16 @@ config TESTING_P2STORAGE_DESTRUCTIVE
 		P2STORAGE-I-ACCEPT-DATA-LOSS-V1.  Keeping this option disabled
 		removes the handlers; attempts then fail explicitly with ENOSYS.
 
+config TESTING_P2STORAGE_FLASH_PREMOUNTED
+	bool "Use an already-mounted flash filesystem for read-only verification"
+	default n
+	depends on !TESTING_P2STORAGE_DESTRUCTIVE
+	---help---
+		Do not mount or unmount the flash filesystem around flash-verify.
+		This is for the flash-boot profile, whose ROMFS startup script has
+		already mounted the exact /dev/smart0 device at the configured flash
+		mountpoint.  The option does not change SD verification.
+
 config TESTING_P2STORAGE_FLASH_CYCLE_COUNT
 	int "Flash rewrite cycle count"
 	default 16
