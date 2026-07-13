@@ -72,6 +72,9 @@ config TESTING_P2STORAGE_DESTRUCTIVE
 		Every destructive invocation must also carry the exact argument
 		P2STORAGE-I-ACCEPT-DATA-LOSS-V1.  Keeping this option disabled
 		removes the handlers; attempts then fail explicitly with ENOSYS.
+		The microSD formatter writes an active FAT32-LBA partition at a
+		1-MiB boundary and formats that partition, matching the P2 ROM's
+		MBR, VBR, and hidden-sector requirements.
 
 config TESTING_P2STORAGE_FLASH_PREMOUNTED
 	bool "Use an already-mounted flash filesystem for read-only verification"
