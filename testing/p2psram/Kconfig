@@ -1,0 +1,38 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config TESTING_P2PSRAM
+	tristate "Propeller 2 external PSRAM service HIL test"
+	default n
+	depends on ARCH_P2 && BUILD_FLAT
+	depends on P2_EC32MB_PSRAM
+	depends on BUILTIN && NSH_BUILTIN_APPS
+	---help---
+		Enable a bounded, destructive test of the explicit /dev/psram0
+		service.  External PSRAM remains a character-device bulk store; this
+		test never treats it as native heap, stack, code, or pointer memory.
+
+if TESTING_P2PSRAM
+
+config TESTING_P2PSRAM_PROGNAME
+	string "Program name"
+	default "p2psram"
+
+config TESTING_P2PSRAM_STACKSIZE
+	int "Main task stack size"
+	default 4096
+	range 3072 8192
+
+config TESTING_P2PSRAM_WORKER_STACKSIZE
+	int "Concurrent workload stack size"
+	default 2048
+	range 1536 4096
+
+config TESTING_P2PSRAM_RANDOM_COUNT
+	int "Random unaligned transfer count"
+	default 1024
+	range 256 4096
+
+endif
