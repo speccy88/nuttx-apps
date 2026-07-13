@@ -1,0 +1,48 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config TESTING_P2SCHEDSTRESS
+	tristate "Propeller 2 scheduler and context stress"
+	default n
+	depends on ARCH_P2 && BUILD_FLAT
+	depends on !DISABLE_PTHREAD && !DISABLE_MQUEUE
+	depends on !DISABLE_POSIX_TIMERS && ENABLE_ALL_SIGNALS
+	depends on CANCELLATION_POINTS && PRIORITY_INHERITANCE
+	depends on ARCH_HAVE_STACKCHECK && STACK_COLORATION && STACK_USAGE
+	depends on SCHED_HAVE_PARENT && SCHED_CHILD_STATUS && SCHED_WAITPID
+	depends on RR_INTERVAL > 0
+	---help---
+		Enable a direct-init Propeller 2 flat-UP stress target.  Successful
+		runs account for 1,004,078 real scheduling and synchronization
+		events across priority preemption, round-robin baton transfers,
+		semaphores, priority-inheritance mutexes, condition variables,
+		POSIX message queues, signals, POSIX timers, pthread lifecycle, and
+		task recreation.  Heap and colored-stack checks are reported
+		separately, including 512 two-thread concurrent allocation rounds.
+		The terminal P2SCHED:PASS marker is emitted only after every category
+		reaches its exact target.
+
+if TESTING_P2SCHEDSTRESS
+
+config TESTING_P2SCHEDSTRESS_PROGNAME
+	string "Program name"
+	default "p2schedstress"
+
+config TESTING_P2SCHEDSTRESS_PRIORITY
+	int "High worker priority"
+	default 120
+	range 2 254
+
+config TESTING_P2SCHEDSTRESS_STACKSIZE
+	int "Pthread stack size"
+	default 3072
+	range 2048 8192
+
+config TESTING_P2SCHEDSTRESS_TASK_STACKSIZE
+	int "Recreated task stack size"
+	default 2048
+	range 1536 8192
+
+endif
