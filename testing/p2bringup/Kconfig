@@ -1,0 +1,39 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config TESTING_P2BRINGUP
+	tristate "Propeller 2 deterministic kernel bring-up"
+	default n
+	depends on ARCH_P2 && BUILD_FLAT
+	depends on ARCH_HAVE_STACKCHECK && STACK_COLORATION
+	depends on SCHED_HAVE_PARENT && SCHED_CHILD_STATUS && SCHED_WAITPID
+	---help---
+		Enable a direct-init Propeller 2 kernel test.  It verifies initialized
+		and zeroed storage, Hub heap bounds, timer wake-up, task exit and
+		recreation, semaphore-driven priority preemption, upward PTRA bounds,
+		and stack coloration.  Each successful stage emits a deterministic
+		P2NUTTX marker for hardware automation.
+
+if TESTING_P2BRINGUP
+
+config TESTING_P2BRINGUP_PROGNAME
+	string "Program name"
+	default "p2bringup"
+
+config TESTING_P2BRINGUP_PRIORITY
+	int "Worker priority"
+	default 110
+	range 1 255
+
+config TESTING_P2BRINGUP_STACKSIZE
+	int "Worker stack size"
+	default 2048
+
+config TESTING_P2BRINGUP_SLEEP_MSEC
+	int "Timer wake-up interval in milliseconds"
+	default 100
+	range 10 1000
+
+endif
