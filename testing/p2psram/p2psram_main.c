@@ -263,7 +263,7 @@ static int p2psram_walking(int fd)
   for (bit = 0; bit < 32; bit++)
     {
       uint32_t expected = UINT32_C(1) << bit;
-      uint32_t actual;
+      uint32_t actual = 0;
       int ret;
 
       ret = p2psram_write_u32(fd, 0, expected);
@@ -275,6 +275,10 @@ static int p2psram_walking(int fd)
       ret = p2psram_read_u32(fd, 0, &actual);
       if (ret < 0 || actual != expected)
         {
+          printf("P2PSRAM:DIAG:WALKING:BIT=%u:PHASE=ONE:"
+                 "EXPECTED=%08" PRIX32 ":ACTUAL=%08" PRIX32
+                 ":RESULT=%d\n",
+                 bit, expected, actual, ret);
           return ret < 0 ? ret : -EILSEQ;
         }
 
@@ -288,6 +292,10 @@ static int p2psram_walking(int fd)
       ret = p2psram_read_u32(fd, 0, &actual);
       if (ret < 0 || actual != expected)
         {
+          printf("P2PSRAM:DIAG:WALKING:BIT=%u:PHASE=ZERO:"
+                 "EXPECTED=%08" PRIX32 ":ACTUAL=%08" PRIX32
+                 ":RESULT=%d\n",
+                 bit, expected, actual, ret);
           return ret < 0 ? ret : -EILSEQ;
         }
     }
