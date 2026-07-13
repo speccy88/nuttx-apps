@@ -89,6 +89,21 @@
 #  error "P2 PSRAM timeout stimulus is not provably longer than one tick"
 #endif
 
+#if P2PSRAM_FNV_PRIME != UINT32_C(0x01000193)
+#  error "P2 PSRAM FNV shift/add decomposition drifted"
+#endif
+
+/****************************************************************************
+ * Private Types
+ ****************************************************************************/
+
+struct p2psram_pattern_state_s
+{
+  uint32_t sequence;
+  uint32_t address;
+  uint8_t address_byte;
+};
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -153,24 +168,65 @@ static int p2psram_parse_sequence(FAR const char *text,
   return 0;
 }
 
+static void p2psram_pattern_init(
+  FAR struct p2psram_pattern_state_s *state,
+  uint32_t sequence, uint32_t address)
+{
+  state->sequence = sequence;
+  state->address = address;
+  state->address_byte = (uint8_t)(address * 37u +
+                                  (address >> 8) * 17u +
+                                  (address >> 16) +
+                                  (address >> 24) * 0x5bu);
+}
+
+static uint8_t p2psram_pattern_next(
+  FAR struct p2psram_pattern_state_s *state)
+{
+  uint8_t sequence_byte;
+  uint8_t value;
+
+  sequence_byte = (uint8_t)(state->sequence >>
+                            ((state->address & 3u) * 8u));
+  value = sequence_byte + state->address_byte;
+  state->address++;
+  state->address_byte += 37u;
+  if ((state->address & UINT32_C(0xff)) == 0)
+    {
+      state->address_byte += 17u;
+    }
+
+  if ((state->address & UINT32_C(0xffff)) == 0)
+    {
+      state->address_byte++;
+    }
+
+  if ((state->address & UINT32_C(0xffffff)) == 0)
+    {
+      state->address_byte += 0x5bu;
+    }
+
+  return value;
+}
+
 static uint8_t p2psram_pattern_byte(uint32_t sequence, uint32_t address)
 {
-  uint8_t sequence_byte = (uint8_t)(sequence >> ((address & 3u) * 8u));
+  struct p2psram_pattern_state_s state;
 
-  return (uint8_t)(sequence_byte + address * 37u +
-                   (address >> 8) * 17u + (address >> 16) +
-                   (address >> 24) * 0x5bu);
+  p2psram_pattern_init(&state, sequence, address);
+  return p2psram_pattern_next(&state);
 }
 
 static void p2psram_fill(uint32_t sequence, uint32_t address,
                          FAR uint8_t *buffer, size_t length)
 {
+  struct p2psram_pattern_state_s state;
   size_t index;
 
+  p2psram_pattern_init(&state, sequence, address);
   for (index = 0; index < length; index++)
     {
-      buffer[index] = p2psram_pattern_byte(sequence,
-                                            address + (uint32_t)index);
+      buffer[index] = p2psram_pattern_next(&state);
     }
 }
 
@@ -181,8 +237,15 @@ static uint32_t p2psram_hash(FAR const uint8_t *buffer, size_t length,
 
   for (index = 0; index < length; index++)
     {
-      hash ^= buffer[index];
-      hash *= P2PSRAM_FNV_PRIME;
+      uint32_t value = hash ^ buffer[index];
+
+      /* 0x01000193 = 2^24 + 2^8 + 2^7 + 2^4 + 2 + 1.  Spell
+       * out the FNV-1a multiply so the P2 compiler emits shifts and adds
+       * instead of the much slower generic multiplication helper.
+       */
+
+      hash = (value << 24) + (value << 8) + (value << 7) +
+             (value << 4) + (value << 1) + value;
     }
 
   return hash;
@@ -461,21 +524,23 @@ static int p2psram_full_coverage(int fd, uint32_t sequence,
   uint32_t address;
   uint32_t write_hash = P2PSRAM_FNV_OFFSET;
   uint32_t read_hash = P2PSRAM_FNV_OFFSET;
-  clock_t start;
-  clock_t write_ticks;
-  clock_t read_ticks;
+  clock_t write_ticks = 0;
+  clock_t read_ticks = 0;
   int ret;
 
-  start = clock_systime_ticks();
   for (address = 0; address < P2_PSRAM_SIZE_BYTES;
        address += sizeof(g_p2psram_buffer))
     {
+      clock_t start;
+
       p2psram_fill(sequence, address, g_p2psram_buffer,
                    sizeof(g_p2psram_buffer));
       write_hash = p2psram_hash(g_p2psram_buffer,
                                 sizeof(g_p2psram_buffer), write_hash);
+      start = clock_systime_ticks();
       ret = p2psram_io(fd, true, address, g_p2psram_buffer,
                        sizeof(g_p2psram_buffer));
+      write_ticks += clock_systime_ticks() - start;
       if (ret < 0)
         {
           return ret;
@@ -490,25 +555,28 @@ static int p2psram_full_coverage(int fd, uint32_t sequence,
         }
     }
 
-  write_ticks = clock_systime_ticks() - start;
-  start = clock_systime_ticks();
   for (address = 0; address < P2_PSRAM_SIZE_BYTES;
        address += sizeof(g_p2psram_buffer))
     {
+      struct p2psram_pattern_state_s state;
+      clock_t start;
       size_t index;
 
       memset(g_p2psram_buffer, 0, sizeof(g_p2psram_buffer));
+      start = clock_systime_ticks();
       ret = p2psram_io(fd, false, address, g_p2psram_buffer,
                        sizeof(g_p2psram_buffer));
+      read_ticks += clock_systime_ticks() - start;
       if (ret < 0)
         {
           return ret;
         }
 
+      p2psram_pattern_init(&state, sequence, address);
       for (index = 0; index < sizeof(g_p2psram_buffer); index++)
         {
           if (g_p2psram_buffer[index] !=
-              p2psram_pattern_byte(sequence, address + (uint32_t)index))
+              p2psram_pattern_next(&state))
             {
               return -EILSEQ;
             }
@@ -525,7 +593,6 @@ static int p2psram_full_coverage(int fd, uint32_t sequence,
         }
     }
 
-  read_ticks = clock_systime_ticks() - start;
   if (read_hash != write_hash)
     {
       return -EILSEQ;
