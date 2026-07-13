@@ -168,7 +168,7 @@ static int p2psram_parse_sequence(FAR const char *text,
   return 0;
 }
 
-static void p2psram_pattern_init(
+static noinline_function void p2psram_pattern_init(
   FAR struct p2psram_pattern_state_s *state,
   uint32_t sequence, uint32_t address)
 {
@@ -180,7 +180,7 @@ static void p2psram_pattern_init(
                                   (address >> 24) * 0x5bu);
 }
 
-static uint8_t p2psram_pattern_next(
+static inline_function uint8_t p2psram_pattern_next(
   FAR struct p2psram_pattern_state_s *state)
 {
   uint8_t sequence_byte;
@@ -209,14 +209,6 @@ static uint8_t p2psram_pattern_next(
   return value;
 }
 
-static uint8_t p2psram_pattern_byte(uint32_t sequence, uint32_t address)
-{
-  struct p2psram_pattern_state_s state;
-
-  p2psram_pattern_init(&state, sequence, address);
-  return p2psram_pattern_next(&state);
-}
-
 static void p2psram_fill(uint32_t sequence, uint32_t address,
                          FAR uint8_t *buffer, size_t length)
 {
@@ -230,22 +222,30 @@ static void p2psram_fill(uint32_t sequence, uint32_t address,
     }
 }
 
-static uint32_t p2psram_hash(FAR const uint8_t *buffer, size_t length,
-                             uint32_t hash)
+static noinline_function uint32_t
+p2psram_hash(FAR const uint8_t *buffer, size_t length, uint32_t hash)
 {
   size_t index;
 
   for (index = 0; index < length; index++)
     {
       uint32_t value = hash ^ buffer[index];
+      uint32_t times3;
+      uint32_t times25;
+      uint32_t times403;
 
-      /* 0x01000193 = 2^24 + 2^8 + 2^7 + 2^4 + 2 + 1.  Spell
-       * out the FNV-1a multiply so the P2 compiler emits shifts and adds
-       * instead of the much slower generic multiplication helper.
+      /* 0x01000193 = 2^24 + 403.  Optimizer barriers keep this exact
+       * addition chain from being folded back into the P2 toolchain's
+       * generic multiplication helper.  The barriers emit no instructions.
        */
 
-      hash = (value << 24) + (value << 8) + (value << 7) +
-             (value << 4) + (value << 1) + value;
+      times3 = (value << 1) + value;
+      __asm__ __volatile__("" : "+r" (times3));
+      times25 = (times3 << 3) + value;
+      __asm__ __volatile__("" : "+r" (times25));
+      times403 = (times25 << 4) + times3;
+      __asm__ __volatile__("" : "+r" (times403));
+      hash = (value << 24) + times403;
     }
 
   return hash;
