@@ -71,12 +71,17 @@
 #define P2STORAGE_INTERRUPT_FILE    "p2interrupt.tmp"
 #define P2STORAGE_SCRATCH_FILE      "p2scrtch.bin"
 
+#define P2STORAGE_SD_SECTOR_SIZE        512
+#define P2STORAGE_MBR_PARTITION_OFFSET  446
+#define P2STORAGE_MBR_SIGNATURE_OFFSET  510
+#define P2STORAGE_P2_ROM_MAX_IMAGE_SIZE 507904
+#define P2STORAGE_FAT_DIR_ENTRY_SIZE    32
+#define P2STORAGE_FAT32_EOC_MIN         UINT32_C(0x0ffffff8)
+#define P2STORAGE_FAT32_ENTRY_MASK      UINT32_C(0x0fffffff)
+
 #ifdef CONFIG_TESTING_P2STORAGE_DESTRUCTIVE
 #  define P2STORAGE_SD_PARTITION_DEVPATH "/dev/p2sd1"
 #  define P2STORAGE_SD_PARTITION_START   UINT32_C(2048)
-#  define P2STORAGE_SD_SECTOR_SIZE       512
-#  define P2STORAGE_MBR_PARTITION_OFFSET 446
-#  define P2STORAGE_MBR_SIGNATURE_OFFSET 510
 #  define P2STORAGE_FAT32_PARTITION_TYPE 0x0c
 #endif
 
@@ -219,6 +224,11 @@ static void p2storage_put_u32le(FAR uint8_t *dest, uint32_t value)
   dest[1] = (uint8_t)(value >> 8);
   dest[2] = (uint8_t)(value >> 16);
   dest[3] = (uint8_t)(value >> 24);
+}
+
+static uint16_t p2storage_get_u16le(FAR const uint8_t *source)
+{
+  return (uint16_t)source[0] | (uint16_t)source[1] << 8;
 }
 
 static uint32_t p2storage_get_u32le(FAR const uint8_t *source)
@@ -794,6 +804,478 @@ static int p2storage_verify_persistence(
          ":BYTES=%u:FNV1A=%08" PRIX32 ":PASS\n",
          medium->name, sequence, P2STORAGE_STREAM_SIZE, checksum);
   return 0;
+}
+
+static int p2storage_sd_read_sector(int fd, uint64_t nsectors,
+                                    uint64_t sector)
+{
+  uint64_t byte_offset;
+  off_t expected;
+  off_t position;
+
+  if (sector >= nsectors ||
+      sector > UINT64_MAX / P2STORAGE_SD_SECTOR_SIZE)
+    {
+      return -EINVAL;
+    }
+
+  byte_offset = sector * P2STORAGE_SD_SECTOR_SIZE;
+  if ((sizeof(off_t) <= sizeof(int32_t) && byte_offset > INT32_MAX) ||
+      byte_offset > INT64_MAX)
+    {
+      return -EOVERFLOW;
+    }
+
+  expected = (off_t)byte_offset;
+  position = lseek(fd, expected, SEEK_SET);
+  if (position < 0)
+    {
+      return p2storage_errno();
+    }
+
+  if (position != expected)
+    {
+      return -EIO;
+    }
+
+  return p2storage_read_all(fd, g_io_buffer,
+                            P2STORAGE_SD_SECTOR_SIZE);
+}
+
+static int p2storage_sd_fat_entry(int fd, uint64_t nsectors,
+                                  uint64_t fat_begin, uint32_t fat_sectors,
+                                  uint32_t cluster, FAR uint32_t *value)
+{
+  uint64_t byte_offset = (uint64_t)cluster * sizeof(uint32_t);
+  uint64_t sector = fat_begin +
+                    byte_offset / P2STORAGE_SD_SECTOR_SIZE;
+  size_t offset = (size_t)(byte_offset % P2STORAGE_SD_SECTOR_SIZE);
+  int ret;
+
+  if (sector < fat_begin || sector >= fat_begin + fat_sectors ||
+      offset > P2STORAGE_SD_SECTOR_SIZE - sizeof(uint32_t))
+    {
+      return -EINVAL;
+    }
+
+  ret = p2storage_sd_read_sector(fd, nsectors, sector);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  *value = p2storage_get_u32le(&g_io_buffer[offset]) &
+           P2STORAGE_FAT32_ENTRY_MASK;
+  return 0;
+}
+
+static int p2storage_sd_rom_verify(void)
+{
+  static const uint8_t filename[11] =
+  {
+    '_', 'B', 'O', 'O', 'T', '_', 'P', '2', 'B', 'I', 'X'
+  };
+
+  struct geometry geometry;
+  FAR const uint8_t *entry;
+  FAR const char *fail_stage = "GEOMETRY";
+  FAR const char *fail_reason = "IO";
+  uint64_t nsectors;
+  uint64_t volume_end;
+  uint64_t fat_begin;
+  uint64_t data_begin;
+  uint64_t root_sector;
+  uint64_t image_sector;
+  uint64_t cluster_bytes;
+  uint64_t data_sectors;
+  uint32_t partition_start;
+  uint32_t partition_sectors;
+  uint32_t total_sectors;
+  uint32_t fat_sectors;
+  uint32_t root_cluster;
+  uint32_t cluster_count;
+  uint32_t first_cluster = 0;
+  uint32_t file_size = 0;
+  uint32_t needed_clusters;
+  uint32_t needed_sectors;
+  uint32_t final_fat_entry = 0;
+  uint32_t hash = UINT32_C(2166136261);
+  uint32_t remaining;
+  uint32_t directory_index = 0;
+  uint16_t bytes_per_sector;
+  uint16_t reserved_sectors;
+  uint16_t fsinfo_sector;
+  uint8_t partition_type;
+  uint8_t sectors_per_cluster;
+  bool found = false;
+  bool end_of_directory = false;
+  unsigned int sector_index;
+  int fd = -1;
+  int ret = -EIO;
+
+  fd = open(g_sd.devpath, O_RDONLY);
+  if (fd < 0)
+    {
+      return p2storage_errno();
+    }
+
+  memset(&geometry, 0, sizeof(geometry));
+  if (ioctl(fd, BIOC_GEOMETRY,
+            (unsigned long)((uintptr_t)&geometry)) < 0)
+    {
+      ret = p2storage_errno();
+      goto out;
+    }
+
+  if (!geometry.geo_available || geometry.geo_nsectors <= 0 ||
+      geometry.geo_sectorsize != P2STORAGE_SD_SECTOR_SIZE)
+    {
+      fail_reason = "UNAVAILABLE-OR-SECTOR-SIZE";
+      ret = -ENODEV;
+      goto out;
+    }
+
+  nsectors = geometry.geo_nsectors;
+  fail_stage = "MBR";
+  ret = p2storage_sd_read_sector(fd, nsectors, 0);
+  if (ret < 0)
+    {
+      fail_reason = "READ";
+      goto out;
+    }
+
+  entry = &g_io_buffer[P2STORAGE_MBR_PARTITION_OFFSET];
+  partition_type = entry[4];
+  partition_start = p2storage_get_u32le(&entry[8]);
+  partition_sectors = p2storage_get_u32le(&entry[12]);
+
+  if ((entry[0] & 0x7f) != 0 ||
+      (partition_type != 0x0b && partition_type != 0x0c) ||
+      partition_start == 0 || partition_sectors == 0 ||
+      partition_start >= nsectors ||
+      partition_sectors > nsectors - partition_start ||
+      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET] != 0x55 ||
+      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET + 1] != 0xaa)
+    {
+      fail_reason = "FIELDS";
+      ret = -EIO;
+      goto out;
+    }
+
+  if (memcmp(&g_io_buffer[0x17c], "Prop", 4) == 0 ||
+      memcmp(&g_io_buffer[0x17c], "ProP", 4) == 0)
+    {
+      fail_reason = "RAW-BOOT-OVERRIDE";
+      ret = -EIO;
+      goto out;
+    }
+
+  printf("P2STORAGE:SD:ROM-MBR:TYPE=%02X:START=%" PRIu32
+         ":SECTORS=%" PRIu32 ":PASS\n",
+         (unsigned int)partition_type, partition_start,
+         partition_sectors);
+
+  fail_stage = "VBR";
+  ret = p2storage_sd_read_sector(fd, nsectors, partition_start);
+  if (ret < 0)
+    {
+      fail_reason = "READ";
+      goto out;
+    }
+
+  bytes_per_sector = p2storage_get_u16le(&g_io_buffer[11]);
+  sectors_per_cluster = g_io_buffer[13];
+  reserved_sectors = p2storage_get_u16le(&g_io_buffer[14]);
+  total_sectors = p2storage_get_u32le(&g_io_buffer[32]);
+  fat_sectors = p2storage_get_u32le(&g_io_buffer[36]);
+  root_cluster = p2storage_get_u32le(&g_io_buffer[44]);
+  fsinfo_sector = p2storage_get_u16le(&g_io_buffer[48]);
+
+  if (bytes_per_sector != P2STORAGE_SD_SECTOR_SIZE ||
+      sectors_per_cluster == 0 || sectors_per_cluster > 128 ||
+      (sectors_per_cluster & (sectors_per_cluster - 1)) != 0 ||
+      reserved_sectors == 0 || g_io_buffer[16] != 2 ||
+      p2storage_get_u16le(&g_io_buffer[17]) != 0 ||
+      p2storage_get_u16le(&g_io_buffer[19]) != 0 ||
+      p2storage_get_u16le(&g_io_buffer[22]) != 0 ||
+      p2storage_get_u32le(&g_io_buffer[28]) != partition_start ||
+      total_sectors == 0 || total_sectors > partition_sectors ||
+      fat_sectors == 0 || p2storage_get_u16le(&g_io_buffer[42]) != 0 ||
+      root_cluster != 2 || fsinfo_sector == 0 ||
+      fsinfo_sector >= reserved_sectors ||
+      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET] != 0x55 ||
+      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET + 1] != 0xaa)
+    {
+      fail_reason = "FIELDS";
+      ret = -EIO;
+      goto out;
+    }
+
+  if (memcmp(&g_io_buffer[0x17c], "Prop", 4) == 0 ||
+      memcmp(&g_io_buffer[0x17c], "ProP", 4) == 0)
+    {
+      fail_reason = "RAW-BOOT-OVERRIDE";
+      ret = -EIO;
+      goto out;
+    }
+
+  if ((uint64_t)reserved_sectors + (uint64_t)fat_sectors * 2 >=
+      total_sectors)
+    {
+      fail_reason = "REGION-BOUNDS";
+      ret = -EIO;
+      goto out;
+    }
+
+  volume_end = (uint64_t)partition_start + total_sectors;
+  fat_begin = (uint64_t)partition_start + reserved_sectors;
+  data_begin = fat_begin + (uint64_t)fat_sectors * 2;
+  data_sectors = total_sectors - reserved_sectors -
+                 (uint64_t)fat_sectors * 2;
+  cluster_count = (uint32_t)(data_sectors / sectors_per_cluster);
+
+  if (volume_end > nsectors || data_begin >= volume_end ||
+      cluster_count < 65525 ||
+      (uint64_t)fat_sectors *
+      (P2STORAGE_SD_SECTOR_SIZE / sizeof(uint32_t)) <
+      (uint64_t)cluster_count + 2)
+    {
+      fail_reason = "FAT32-BOUNDS";
+      ret = -EIO;
+      goto out;
+    }
+
+  printf("P2STORAGE:SD:ROM-VBR:BPS=%u:SPC=%u:RESERVED=%u:"
+         "FATS=2:FATSZ=%" PRIu32 ":ROOT=%" PRIu32
+         ":FSINFO=%u:PASS\n",
+         (unsigned int)bytes_per_sector,
+         (unsigned int)sectors_per_cluster,
+         (unsigned int)reserved_sectors, fat_sectors, root_cluster,
+         (unsigned int)fsinfo_sector);
+
+  fail_stage = "FSINFO";
+  ret = p2storage_sd_read_sector(fd, nsectors,
+                                 (uint64_t)partition_start +
+                                 fsinfo_sector);
+  if (ret < 0)
+    {
+      fail_reason = "READ";
+      goto out;
+    }
+
+  if (p2storage_get_u32le(&g_io_buffer[0]) != UINT32_C(0x41615252) ||
+      p2storage_get_u32le(&g_io_buffer[0x1e4]) !=
+      UINT32_C(0x61417272) ||
+      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET] != 0x55 ||
+      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET + 1] != 0xaa)
+    {
+      fail_reason = "SIGNATURE";
+      ret = -EIO;
+      goto out;
+    }
+
+  printf("P2STORAGE:SD:ROM-FSINFO:LBA=%" PRIu64 ":PASS\n",
+         (uint64_t)partition_start + fsinfo_sector);
+
+  fail_stage = "ROOT";
+  root_sector = data_begin;
+  for (sector_index = 0;
+       sector_index < sectors_per_cluster && !found && !end_of_directory;
+       sector_index++)
+    {
+      unsigned int entry_index;
+
+      ret = p2storage_sd_read_sector(fd, nsectors,
+                                     root_sector + sector_index);
+      if (ret < 0)
+        {
+          fail_reason = "READ";
+          goto out;
+        }
+
+      for (entry_index = 0;
+           entry_index < P2STORAGE_SD_SECTOR_SIZE /
+                         P2STORAGE_FAT_DIR_ENTRY_SIZE;
+           entry_index++)
+        {
+          size_t offset = entry_index * P2STORAGE_FAT_DIR_ENTRY_SIZE;
+          FAR const uint8_t *directory_entry = &g_io_buffer[offset];
+
+          if (directory_entry[0] == 0)
+            {
+              end_of_directory = true;
+              break;
+            }
+
+          if (memcmp(directory_entry, filename, sizeof(filename)) == 0 &&
+              (directory_entry[11] & 0xd8) == 0)
+            {
+              uint16_t cluster_high =
+                p2storage_get_u16le(&directory_entry[20]);
+
+              if ((cluster_high & 0xf000) != 0)
+                {
+                  fail_reason = "CLUSTER-HIGH";
+                  ret = -EIO;
+                  goto out;
+                }
+
+              first_cluster = (uint32_t)cluster_high << 16 |
+                              p2storage_get_u16le(&directory_entry[26]);
+              file_size = p2storage_get_u32le(&directory_entry[28]);
+              directory_index = sector_index *
+                                (P2STORAGE_SD_SECTOR_SIZE /
+                                 P2STORAGE_FAT_DIR_ENTRY_SIZE) +
+                                entry_index;
+              found = true;
+              break;
+            }
+        }
+    }
+
+  if (!found || first_cluster < 2 ||
+      first_cluster > (uint64_t)cluster_count + 1 || file_size == 0 ||
+      file_size > P2STORAGE_P2_ROM_MAX_IMAGE_SIZE)
+    {
+      fail_reason = "FILE-NOT-ROM-COMPATIBLE";
+      ret = -ENOENT;
+      goto out;
+    }
+
+  printf("P2STORAGE:SD:ROM-ROOT:LBA=%" PRIu64 ":ENTRY=%" PRIu32
+         ":NAME=_BOOT_P2.BIX:CLUSTER=%" PRIu32 ":BYTES=%" PRIu32
+         ":PASS\n",
+         root_sector, directory_index, first_cluster, file_size);
+
+  fail_stage = "CHAIN";
+  cluster_bytes = (uint64_t)sectors_per_cluster *
+                  P2STORAGE_SD_SECTOR_SIZE;
+  needed_clusters = (uint32_t)(((uint64_t)file_size - 1) /
+                               cluster_bytes + 1);
+
+  for (sector_index = 0; sector_index < needed_clusters; sector_index++)
+    {
+      uint32_t cluster = first_cluster + sector_index;
+      uint32_t first_fat_entry;
+      uint32_t second_fat_entry;
+
+      if (cluster < first_cluster ||
+          cluster > (uint64_t)cluster_count + 1)
+        {
+          fail_reason = "CLUSTER-BOUNDS";
+          ret = -EIO;
+          goto out;
+        }
+
+      ret = p2storage_sd_fat_entry(fd, nsectors, fat_begin,
+                                   fat_sectors, cluster,
+                                   &first_fat_entry);
+      if (ret < 0)
+        {
+          fail_reason = "FAT1-READ";
+          goto out;
+        }
+
+      ret = p2storage_sd_fat_entry(fd, nsectors,
+                                   fat_begin + fat_sectors,
+                                   fat_sectors, cluster,
+                                   &second_fat_entry);
+      if (ret < 0)
+        {
+          fail_reason = "FAT2-READ";
+          goto out;
+        }
+
+      if (first_fat_entry != second_fat_entry)
+        {
+          fail_reason = "FAT-COPIES";
+          ret = -EIO;
+          goto out;
+        }
+
+      if (sector_index + 1 < needed_clusters)
+        {
+          if (first_fat_entry != cluster + 1)
+            {
+              fail_reason = "FRAGMENTED";
+              ret = -EIO;
+              goto out;
+            }
+        }
+      else
+        {
+          final_fat_entry = first_fat_entry;
+          if (final_fat_entry < P2STORAGE_FAT32_EOC_MIN)
+            {
+              fail_reason = "NO-EOC";
+              ret = -EIO;
+              goto out;
+            }
+        }
+    }
+
+  printf("P2STORAGE:SD:ROM-CHAIN:FIRST=%" PRIu32
+         ":CLUSTERS=%" PRIu32 ":CONTIGUOUS=1:EOC=%08" PRIX32
+         ":PASS\n",
+         first_cluster, needed_clusters, final_fat_entry);
+
+  fail_stage = "IMAGE";
+  needed_sectors = (file_size - 1) / P2STORAGE_SD_SECTOR_SIZE + 1;
+  image_sector = data_begin +
+                 (uint64_t)(first_cluster - 2) * sectors_per_cluster;
+  if (image_sector >= volume_end ||
+      needed_sectors > volume_end - image_sector)
+    {
+      fail_reason = "SECTOR-BOUNDS";
+      ret = -EIO;
+      goto out;
+    }
+
+  remaining = file_size;
+  for (sector_index = 0; sector_index < needed_sectors; sector_index++)
+    {
+      size_t length = remaining > P2STORAGE_SD_SECTOR_SIZE ?
+                      P2STORAGE_SD_SECTOR_SIZE : remaining;
+
+      ret = p2storage_sd_read_sector(fd, nsectors,
+                                     image_sector + sector_index);
+      if (ret < 0)
+        {
+          fail_reason = "READ";
+          goto out;
+        }
+
+      hash = p2storage_fnv1a_part(g_io_buffer, length, hash);
+      remaining -= (uint32_t)length;
+    }
+
+  if (remaining != 0)
+    {
+      fail_reason = "SHORT";
+      ret = -EIO;
+      goto out;
+    }
+
+  printf("P2STORAGE:SD:ROM-IMAGE:LBA=%" PRIu64 ":SECTORS=%" PRIu32
+         ":BYTES=%" PRIu32 ":FNV1A=%08" PRIX32 ":PASS\n",
+         image_sector, needed_sectors, file_size, hash);
+  ret = 0;
+
+out:
+  if (close(fd) < 0 && ret == 0)
+    {
+      fail_stage = "CLOSE";
+      fail_reason = "IO";
+      ret = p2storage_errno();
+    }
+
+  if (ret < 0)
+    {
+      printf("P2STORAGE:SD:ROM-FAIL:STAGE=%s:REASON=%s\n",
+             fail_stage, fail_reason);
+    }
+
+  return ret;
 }
 
 #ifdef CONFIG_TESTING_P2STORAGE_DESTRUCTIVE
@@ -1812,6 +2294,7 @@ static void p2storage_usage(FAR const char *progname)
   printf("usage: %s probe\n", progname);
   printf("       %s flash-verify 8HEX\n", progname);
   printf("       %s sd-verify 8HEX\n", progname);
+  printf("       %s sd-rom-verify\n", progname);
 #ifdef CONFIG_TESTING_P2STORAGE_DESTRUCTIVE
   printf("       %s flash-format %s\n", progname,
          P2STORAGE_DESTRUCTIVE_MAGIC);
@@ -1883,6 +2366,16 @@ int main(int argc, FAR char *argv[])
 
       terminal = "PROBE";
       ret = p2storage_probe();
+    }
+  else if (strcmp(argv[1], "sd-rom-verify") == 0)
+    {
+      if (argc != 2)
+        {
+          return p2storage_fail("ARGS", -EINVAL);
+        }
+
+      terminal = "SD-ROM-VERIFY";
+      ret = p2storage_sd_rom_verify();
     }
   else if (strcmp(argv[1], "flash-verify") == 0 ||
            strcmp(argv[1], "sd-verify") == 0 ||
