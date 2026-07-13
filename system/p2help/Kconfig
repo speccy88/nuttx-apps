@@ -1,0 +1,22 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_P2HELP
+	tristate "Propeller 2 showcase help"
+	default n
+	depends on ARCH_P2 && BUILD_FLAT
+	depends on BUILTIN && NSH_BUILTIN_APPS
+	---help---
+		Add a compact p2help command which identifies the exact P2 Edge board
+		and lists the registered showcase devices, pin sharing, and useful NSH
+		demo commands.
+
+if SYSTEM_P2HELP
+
+config SYSTEM_P2HELP_PROGNAME
+	string "Program name"
+	default "p2help"
+
+endif

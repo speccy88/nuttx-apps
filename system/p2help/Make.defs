@@ -1,0 +1,9 @@
+############################################################################
+# apps/system/p2help/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_SYSTEM_P2HELP),)
+CONFIGURED_APPS += $(APPDIR)/system/p2help
+endif

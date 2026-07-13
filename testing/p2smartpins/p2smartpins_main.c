@@ -108,6 +108,16 @@ static int p2smart_fail(FAR const char *stage, int error)
   return EXIT_FAILURE;
 }
 
+static bool p2smart_stage(FAR const char *selected, FAR const char *stage)
+{
+  return strcmp(selected, "all") == 0 || strcmp(selected, stage) == 0;
+}
+
+static void p2smart_usage(FAR const char *progname)
+{
+  printf("Usage: %s [all|gpio|edge|uart|pwm|analog|spi]\n", progname);
+}
+
 #if defined(CONFIG_TESTING_P2SMARTPINS_UART) || \
     defined(CONFIG_TESTING_P2SMARTPINS_SPI)
 static uint32_t p2smart_fnv1a(FAR const uint8_t *data, size_t length)
@@ -776,10 +786,27 @@ static int p2smart_spi_test(void)
 
 int main(int argc, FAR char *argv[])
 {
+  FAR const char *selected;
+  bool ran = false;
   int ret;
 
-  UNUSED(argc);
-  UNUSED(argv);
+  if (argc > 2)
+    {
+      p2smart_usage(argv[0]);
+      return p2smart_fail("ARGS", -EINVAL);
+    }
+
+  selected = argc == 2 ? argv[1] : "all";
+  if (!p2smart_stage(selected, "gpio") &&
+      strcmp(selected, "edge") != 0 &&
+      strcmp(selected, "uart") != 0 &&
+      strcmp(selected, "pwm") != 0 &&
+      strcmp(selected, "analog") != 0 &&
+      strcmp(selected, "spi") != 0)
+    {
+      p2smart_usage(argv[0]);
+      return p2smart_fail("ARGS", -EINVAL);
+    }
 
   printf("P2SMART:BEGIN\n");
   printf("P2SMART:WIRING=P0-P1,P2-P3,P4-P5,P6-P7\n");
@@ -801,51 +828,80 @@ int main(int argc, FAR char *argv[])
 #endif
   printf("\n");
 
-  ret = p2smart_gpio_test();
-  if (ret < 0)
+  if (p2smart_stage(selected, "gpio"))
     {
-      return p2smart_fail("GPIO", ret);
+      ran = true;
+      ret = p2smart_gpio_test();
+      if (ret < 0)
+        {
+          return p2smart_fail("GPIO", ret);
+        }
     }
 
 #ifdef CONFIG_TESTING_P2SMARTPINS_EDGE
-  ret = p2smart_edge_test();
-  if (ret < 0)
+  if (p2smart_stage(selected, "edge"))
     {
-      return p2smart_fail("EDGE", ret);
+      ran = true;
+      ret = p2smart_edge_test();
+      if (ret < 0)
+        {
+          return p2smart_fail("EDGE", ret);
+        }
     }
 #endif
 
 #ifdef CONFIG_TESTING_P2SMARTPINS_UART
-  ret = p2smart_uart_test();
-  if (ret < 0)
+  if (p2smart_stage(selected, "uart"))
     {
-      return p2smart_fail("UART", ret);
+      ran = true;
+      ret = p2smart_uart_test();
+      if (ret < 0)
+        {
+          return p2smart_fail("UART", ret);
+        }
     }
 #endif
 
 #ifdef CONFIG_TESTING_P2SMARTPINS_PWM_CAPTURE
-  ret = p2smart_pwm_capture_test();
-  if (ret < 0)
+  if (p2smart_stage(selected, "pwm"))
     {
-      return p2smart_fail("PWM_CAPTURE", ret);
+      ran = true;
+      ret = p2smart_pwm_capture_test();
+      if (ret < 0)
+        {
+          return p2smart_fail("PWM_CAPTURE", ret);
+        }
     }
 #endif
 
 #ifdef CONFIG_TESTING_P2SMARTPINS_DAC_ADC
-  ret = p2smart_dac_adc_test();
-  if (ret < 0)
+  if (p2smart_stage(selected, "analog"))
     {
-      return p2smart_fail("DAC_ADC", ret);
+      ran = true;
+      ret = p2smart_dac_adc_test();
+      if (ret < 0)
+        {
+          return p2smart_fail("DAC_ADC", ret);
+        }
     }
 #endif
 
 #ifdef CONFIG_TESTING_P2SMARTPINS_SPI
-  ret = p2smart_spi_test();
-  if (ret < 0)
+  if (p2smart_stage(selected, "spi"))
     {
-      return p2smart_fail("SPI", ret);
+      ran = true;
+      ret = p2smart_spi_test();
+      if (ret < 0)
+        {
+          return p2smart_fail("SPI", ret);
+        }
     }
 #endif
+
+  if (!ran)
+    {
+      return p2smart_fail("UNAVAILABLE", -ENOSYS);
+    }
 
   printf("P2SMART:PASS\n");
   return EXIT_SUCCESS;

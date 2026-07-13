@@ -1304,10 +1304,77 @@ invalid_arg:
  * Name: cmd_sleep
  ****************************************************************************/
 
+#if defined(CONFIG_TTY_SIGINT) && \
+    !defined(CONFIG_DISABLE_ALL_SIGNALS) && \
+    (!defined(CONFIG_NSH_DISABLE_SLEEP) || \
+     !defined(CONFIG_NSH_DISABLE_USLEEP))
+struct nsh_sleep_signal_s
+{
+  struct sigaction oldact;
+  bool installed;
+  int tc;
+};
+
+static void nsh_sleep_sigint(int signo, FAR siginfo_t *siginfo,
+                             FAR void *context)
+{
+  UNUSED(signo);
+  UNUSED(siginfo);
+  UNUSED(context);
+}
+
+static int nsh_sleep_prepare(FAR struct nsh_vtbl_s *vtbl,
+                             FAR struct nsh_sleep_signal_s *state,
+                             FAR const char *command)
+{
+  struct sigaction act;
+
+  memset(state, 0, sizeof(*state));
+  state->tc = -1;
+
+  act.sa_user = NULL;
+  act.sa_sigaction = nsh_sleep_sigint;
+  sigemptyset(&act.sa_mask);
+  act.sa_flags = 0;
+
+  if (sigaction(SIGINT, &act, &state->oldact) < 0)
+    {
+      nsh_error(vtbl, g_fmtcmdfailed, command, "sigaction", NSH_ERRNO);
+      return ERROR;
+    }
+
+  state->installed = true;
+  if (vtbl->isctty)
+    {
+      state->tc = nsh_ioctl(vtbl, TIOCSCTTY, getpid());
+    }
+
+  return OK;
+}
+
+static void nsh_sleep_cleanup(FAR struct nsh_vtbl_s *vtbl,
+                              FAR struct nsh_sleep_signal_s *state)
+{
+  if (vtbl->isctty && state->tc == OK)
+    {
+      nsh_ioctl(vtbl, TIOCNOTTY, 0);
+    }
+
+  if (state->installed)
+    {
+      sigaction(SIGINT, &state->oldact, NULL);
+      state->installed = false;
+    }
+}
+#endif
+
 #if !defined(CONFIG_NSH_DISABLE_SLEEP) && \
     !defined(CONFIG_DISABLE_ALL_SIGNALS)
 int cmd_sleep(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv)
 {
+#ifdef CONFIG_TTY_SIGINT
+  struct nsh_sleep_signal_s state;
+#endif
   UNUSED(argc);
 
   FAR char *endptr;
@@ -1320,7 +1387,19 @@ int cmd_sleep(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv)
       return ERROR;
     }
 
+#ifdef CONFIG_TTY_SIGINT
+  if (nsh_sleep_prepare(vtbl, &state, argv[0]) < 0)
+    {
+      return ERROR;
+    }
+#endif
+
   sleep(secs);
+
+#ifdef CONFIG_TTY_SIGINT
+  nsh_sleep_cleanup(vtbl, &state);
+#endif
+
   return OK;
 }
 #endif
@@ -1332,6 +1411,9 @@ int cmd_sleep(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv)
     !defined(CONFIG_DISABLE_ALL_SIGNALS)
 int cmd_usleep(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv)
 {
+#ifdef CONFIG_TTY_SIGINT
+  struct nsh_sleep_signal_s state;
+#endif
   UNUSED(argc);
 
   FAR char *endptr;
@@ -1344,7 +1426,19 @@ int cmd_usleep(FAR struct nsh_vtbl_s *vtbl, int argc, FAR char **argv)
       return ERROR;
     }
 
+#ifdef CONFIG_TTY_SIGINT
+  if (nsh_sleep_prepare(vtbl, &state, argv[0]) < 0)
+    {
+      return ERROR;
+    }
+#endif
+
   usleep(usecs);
+
+#ifdef CONFIG_TTY_SIGINT
+  nsh_sleep_cleanup(vtbl, &state);
+#endif
+
   return OK;
 }
 #endif
