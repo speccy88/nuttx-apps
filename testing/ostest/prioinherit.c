@@ -271,7 +271,7 @@ static inline void hog_cpu(void)
    */
 
   volatile int i;
-  for (i = 0; i < INT_MAX; i++);
+  for (i = 0; i < INT_MAX && nhighpri_running() > 0; i++);
 #endif
 }
 
