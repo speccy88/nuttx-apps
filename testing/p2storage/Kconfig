@@ -1,0 +1,113 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config TESTING_P2STORAGE
+	tristate "Propeller 2 deterministic storage HIL test"
+	default n
+	depends on ARCH_P2 && BUILD_FLAT
+	depends on P2_EC32MB_STORAGE_BINDINGS
+	depends on MTD_SMART && FS_SMARTFS
+	depends on MMCSD_SPI && FS_FAT
+	depends on !DISABLE_MOUNTPOINT
+	---help---
+		Enable a command-driven test for the protected onboard SMART flash
+		partition and the removable microSD block device.  The probe and
+		persistence-verification commands are read-only.  No command runs at
+		boot and formatting is never automatic.
+
+if TESTING_P2STORAGE
+
+config TESTING_P2STORAGE_PROGNAME
+	string "Program name"
+	default "p2storage"
+
+config TESTING_P2STORAGE_STACKSIZE
+	int "Task stack size"
+	default 4096
+	range 2048 16384
+
+config TESTING_P2STORAGE_FLASH_DEVPATH
+	string "Protected SMART flash block device"
+	default "/dev/smart0"
+
+config TESTING_P2STORAGE_FLASH_MOUNTPOINT
+	string "SMART flash mount point"
+	default "/mnt/flash"
+
+config TESTING_P2STORAGE_SD_DEVPATH
+	string "microSD block device"
+	default "/dev/mmcsd0"
+
+config TESTING_P2STORAGE_SD_MOUNTPOINT
+	string "microSD mount point"
+	default "/mnt/sd"
+
+config TESTING_P2STORAGE_RECORD_SIZE
+	int "Deterministic persistence record size"
+	default 256
+	range 256 256
+	---help---
+		The strict host protocol and target use one byte-defined 256-byte
+		record.  The fixed range prevents the built image from silently
+			drifting away from host-side checksum expectations.
+
+config TESTING_P2STORAGE_STREAM_SIZE
+	int "Persistent streaming test file size"
+	default 1048576
+	range 1048576 1048576
+	---help---
+		The persistent flash and SD files are streamed through a 4 KiB Hub
+		buffer.  One MiB is larger than the P2's entire 512 KiB Hub RAM, so a
+		passing write/read CRC cannot have come from a whole-file RAM buffer.
+
+config TESTING_P2STORAGE_DESTRUCTIVE
+	bool "Enable explicitly authenticated destructive storage commands"
+	default n
+	depends on FSUTILS_MKSMARTFS && FSUTILS_MKFATFS
+	---help---
+		Compile handlers which format or write the flash and microSD media.
+		Every destructive invocation must also carry the exact argument
+		P2STORAGE-I-ACCEPT-DATA-LOSS-V1.  Keeping this option disabled
+		removes the handlers; attempts then fail explicitly with ENOSYS.
+
+config TESTING_P2STORAGE_FLASH_CYCLE_COUNT
+	int "Flash rewrite cycle count"
+	default 16
+	range 1 1000
+	depends on TESTING_P2STORAGE_DESTRUCTIVE
+
+config TESTING_P2STORAGE_SD_STRESS_COUNT
+	int "microSD stress iteration count"
+	default 64
+	range 1 10000
+	depends on TESTING_P2STORAGE_DESTRUCTIVE
+
+config TESTING_P2STORAGE_BUS_ALTERNATE_COUNT
+	int "Flash/microSD alternating iteration count"
+	default 1000
+	range 1000 10000
+	depends on TESTING_P2STORAGE_DESTRUCTIVE
+
+config TESTING_P2STORAGE_FLASH_FULL_MAX_BYTES
+	int "Maximum bytes attempted by the flash-full test"
+	default 20971520
+	range 16777216 33554432
+	depends on TESTING_P2STORAGE_DESTRUCTIVE
+	---help---
+		A safety bound beyond the 15.5-MiB protected data partition.  The
+		flash-full command passes only after the filesystem reports ENOSPC;
+		reaching this bound is a failure.
+
+config TESTING_P2STORAGE_INTERRUPT_HOLD_MSEC
+	int "Interrupted-write power-cut window in milliseconds"
+	default 10000
+	range 1000 60000
+	depends on TESTING_P2STORAGE_DESTRUCTIVE
+	---help---
+		Time the flash-interrupt-arm command leaves its partial file open
+		after emitting READY:POWER-CUT.  The HIL controller must reset the
+		board in this window; a normal timeout is reported as a failure.
+
+endif
