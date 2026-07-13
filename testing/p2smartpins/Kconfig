@@ -1,0 +1,114 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config TESTING_P2SMARTPINS
+	tristate "Propeller 2 deterministic Smart Pin HIL test"
+	default n
+	depends on ARCH_P2 && BUILD_FLAT
+	depends on P2_EC32MB_GPIO && DEV_GPIO
+	---help---
+		Enable the deterministic Propeller 2 Smart Pin loopback test.  The
+		baseline drives P0 while sampling P1 through /dev/gpio0 and
+		/dev/gpio1.  The receiver is always configured before the source, and
+		both endpoints are returned to floating inputs on exit.
+
+if TESTING_P2SMARTPINS
+
+config TESTING_P2SMARTPINS_PROGNAME
+	string "Program name"
+	default "p2smartpins"
+
+config TESTING_P2SMARTPINS_GPIO_OUT_DEVPATH
+	string "P0 GPIO output device"
+	default "/dev/gpio0"
+
+config TESTING_P2SMARTPINS_GPIO_IN_DEVPATH
+	string "P1 GPIO input device"
+	default "/dev/gpio1"
+
+config TESTING_P2SMARTPINS_EDGE
+	bool "Test P0 to P1 GPIO edge notifications"
+	default n
+	depends on DEV_GPIO_NSIGNALS > 0
+	---help---
+		Require GPIO_INTERRUPT_BOTH_PIN and GPIOC_REGISTER support on P1.
+		P1 is armed before P0 is driven.  Do not select this option until the
+		P2 Smart Pin event is connected to a real architecture interrupt.
+
+config TESTING_P2SMARTPINS_UART
+	bool "Test configurable UART on P2 to P3"
+	default n
+	depends on SERIAL_TERMIOS
+	---help---
+		Send and receive a deterministic 16-byte record through a non-console
+		UART.  The lower half must configure P3 as an input before enabling
+		P2 as an output.
+
+config TESTING_P2SMARTPINS_UART_DEVPATH
+	string "Configurable UART device"
+	default "/dev/ttyS1"
+	depends on TESTING_P2SMARTPINS_UART
+
+config TESTING_P2SMARTPINS_PWM_CAPTURE
+	bool "Test P4 PWM to P5 capture"
+	default n
+	depends on PWM && CAPTURE
+	---help---
+		Measure 1-kHz PWM at 25, 50, and 75 percent duty through the standard
+		PWM and capture upper halves.  The capture device is opened before the
+		PWM source is enabled.
+
+config TESTING_P2SMARTPINS_PWM_DEVPATH
+	string "P4 PWM device"
+	default "/dev/pwm0"
+	depends on TESTING_P2SMARTPINS_PWM_CAPTURE
+
+config TESTING_P2SMARTPINS_CAPTURE_DEVPATH
+	string "P5 capture device"
+	default "/dev/cap0"
+	depends on TESTING_P2SMARTPINS_PWM_CAPTURE
+
+config TESTING_P2SMARTPINS_DAC_ADC
+	bool "Test P4 DAC to P5 ADC"
+	default n
+	depends on DAC && ADC
+	---help---
+		Verify three monotonically increasing DAC/ADC samples.  This option
+		must remain disabled for a direct short: install and verify the
+		appropriate analog series resistance first.  The ADC is opened before
+		the DAC source is enabled.
+
+config TESTING_P2SMARTPINS_DAC_DEVPATH
+	string "P4 DAC device"
+	default "/dev/dac0"
+	depends on TESTING_P2SMARTPINS_DAC_ADC
+
+config TESTING_P2SMARTPINS_ADC_DEVPATH
+	string "P5 ADC device"
+	default "/dev/adc0"
+	depends on TESTING_P2SMARTPINS_DAC_ADC
+
+config TESTING_P2SMARTPINS_DAC_FULL_SCALE
+	int "DAC full-scale code"
+	default 65535
+	range 255 2147483647
+	depends on TESTING_P2SMARTPINS_DAC_ADC
+
+config TESTING_P2SMARTPINS_SPI
+	bool "Test P6 SPI MOSI to P7 MISO"
+	default n
+	depends on SPI_DRIVER && SPI_EXCHANGE
+	---help---
+		Exchange a deterministic 16-byte record through the standard SPI test
+		character driver.  P7 must be configured as MISO before P6 is enabled
+		as MOSI.  Clock and chip select are separate controller pins and are
+		not part of the P6-P7 link.
+
+config TESTING_P2SMARTPINS_SPI_DEVPATH
+	string "General-purpose SPI character device"
+	default "/dev/spi0"
+	depends on TESTING_P2SMARTPINS_SPI
+
+endif
