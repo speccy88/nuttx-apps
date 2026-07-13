@@ -239,7 +239,9 @@ p2psram_hash(FAR const uint8_t *buffer, size_t length, uint32_t hash)
        * generic multiplication helper.  The barriers emit no instructions.
        */
 
-      times3 = (value << 1) + value;
+      times3 = value << 1;
+      __asm__ __volatile__("" : "+r" (times3));
+      times3 += value;
       __asm__ __volatile__("" : "+r" (times3));
       times25 = (times3 << 3) + value;
       __asm__ __volatile__("" : "+r" (times25));
