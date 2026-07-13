@@ -1516,7 +1516,12 @@ int main(int argc, FAR char *argv[])
       return p2storage_fail("ARGS", -EINVAL);
     }
 
-  printf("P2STORAGE:BEGIN:COMMAND=%s\n", argv[1]);
+  /* NSH starts builtin applications asynchronously and may redraw its prompt
+   * before this task first runs.  Start on a fresh line so the strict HIL
+   * protocol never accepts a marker joined to terminal control text.
+   */
+
+  printf("\nP2STORAGE:BEGIN:COMMAND=%s\n", argv[1]);
 
   if (strcmp(argv[1], "probe") == 0)
     {
