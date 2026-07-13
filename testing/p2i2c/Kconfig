@@ -1,0 +1,23 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config TESTING_P2I2C
+	tristate "Propeller 2 BMP180 I2C HIL test"
+	default n
+	depends on ARCH_P2 && BUILD_FLAT
+	depends on I2C && I2C_DRIVER
+	depends on SENSORS_BMP180 && !SENSORS_BMP180_UORB
+	---help---
+		Enable the direct-init Propeller 2 BMP180 test.  It proves a raw
+		repeated-start register read through /dev/i2c0, then obtains exactly
+		32 plausible pressure readings from the legacy /dev/press0 interface.
+
+if TESTING_P2I2C
+
+config TESTING_P2I2C_PROGNAME
+	string "Program name"
+	default "p2i2c"
+
+endif

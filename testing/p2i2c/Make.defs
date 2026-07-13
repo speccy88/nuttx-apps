@@ -1,0 +1,10 @@
+############################################################################
+# apps/testing/p2i2c/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+############################################################################
+
+ifneq ($(CONFIG_TESTING_P2I2C),)
+CONFIGURED_APPS += $(APPDIR)/testing/p2i2c
+endif
