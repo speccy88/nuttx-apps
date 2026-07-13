@@ -109,6 +109,7 @@ static void *fifo_func(void *parameter)
   struct sched_param param;
   time_t last;
   time_t now;
+  int oldstate;
   int ret;
 
   while (sem_wait(&g_sporadic_sem) < 0);
@@ -117,6 +118,8 @@ static void *fifo_func(void *parameter)
 
   for (; ; )
     {
+      pthread_testcancel();
+
       do
         {
           sched_lock(); /* Just to exercise more logic */
@@ -134,8 +137,10 @@ static void *fifo_func(void *parameter)
       while (now == last);
 
       sched_lock(); /* Just to exercise more logic */
+      pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
       printf("%4lu FIFO:     %d\n",
              (unsigned long)(now - g_start_time), param.sched_priority);
+      pthread_setcancelstate(oldstate, NULL);
       last = now;
       sched_unlock();
     }
@@ -147,6 +152,7 @@ static FAR void *sporadic_func(FAR void *parameter)
   time_t last;
   time_t now;
   int prio = 0;
+  int oldstate;
   int ret;
 
   while (sem_wait(&g_sporadic_sem) < 0);
@@ -155,6 +161,8 @@ static FAR void *sporadic_func(FAR void *parameter)
 
   for (; ; )
     {
+      pthread_testcancel();
+
       do
         {
           sched_lock(); /* Just to exercise more logic */
@@ -172,9 +180,11 @@ static FAR void *sporadic_func(FAR void *parameter)
       while (now == last && prio == param.sched_priority);
 
       sched_lock(); /* Just to exercise more logic */
+      pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
       printf("%4lu SPORADIC: %d->%d\n",
              (unsigned long)(now - g_start_time), prio,
              param.sched_priority);
+      pthread_setcancelstate(oldstate, NULL);
       prio = param.sched_priority;
       last = now;
       sched_unlock();

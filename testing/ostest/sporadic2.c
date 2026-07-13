@@ -114,6 +114,8 @@ static FAR void *sporadic_func(FAR void *parameter)
 
   for (; ; )
     {
+      pthread_testcancel();
+
       do
         {
           int ndx;
@@ -302,7 +304,7 @@ static void sporadic_test_case(int32_t budget_1_ns, int32_t budget_2_ns)
   pthread_join(sporadic_thread1, &result);
 
   ret = pthread_cancel(sporadic_thread2);
-  pthread_join(sporadic_thread1, &result);
+  pthread_join(sporadic_thread2, &result);
 
   sem_destroy(&g_sporadic_sem);
   ret = sched_setparam(0, &myparam);
