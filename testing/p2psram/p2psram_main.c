@@ -266,14 +266,12 @@ static int p2psram_walking(int fd)
       uint32_t actual = 0;
       int ret;
 
-      printf("P2PSRAM:TRACE:WALKING:BIT=%u:STEP=ONE-WRITE\n", bit);
       ret = p2psram_write_u32(fd, 0, expected);
       if (ret < 0)
         {
           return ret;
         }
 
-      printf("P2PSRAM:TRACE:WALKING:BIT=%u:STEP=ONE-READ\n", bit);
       ret = p2psram_read_u32(fd, 0, &actual);
       if (ret < 0 || actual != expected)
         {
@@ -285,14 +283,12 @@ static int p2psram_walking(int fd)
         }
 
       expected = ~expected;
-      printf("P2PSRAM:TRACE:WALKING:BIT=%u:STEP=ZERO-WRITE\n", bit);
       ret = p2psram_write_u32(fd, 0, expected);
       if (ret < 0)
         {
           return ret;
         }
 
-      printf("P2PSRAM:TRACE:WALKING:BIT=%u:STEP=ZERO-READ\n", bit);
       ret = p2psram_read_u32(fd, 0, &actual);
       if (ret < 0 || actual != expected)
         {
@@ -302,8 +298,6 @@ static int p2psram_walking(int fd)
                  bit, expected, actual, ret);
           return ret < 0 ? ret : -EILSEQ;
         }
-
-      printf("P2PSRAM:TRACE:WALKING:BIT=%u:STEP=DONE\n", bit);
     }
 
   return 0;
