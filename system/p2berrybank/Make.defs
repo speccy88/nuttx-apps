@@ -1,0 +1,9 @@
+############################################################################
+# apps/system/p2berrybank/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_SYSTEM_P2BERRYBANK),)
+CONFIGURED_APPS += $(APPDIR)/system/p2berrybank
+endif

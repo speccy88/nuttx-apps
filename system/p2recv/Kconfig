@@ -1,0 +1,49 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_P2RECV
+	tristate "Propeller 2 serial file receiver"
+	default n
+	depends on ARCH_P2 && BUILTIN && NSH_BUILTIN_APPS
+	---help---
+		Add the p2recv NSH command.  It receives a host-framed byte stream
+		from standard input, verifies per-chunk and whole-file CRC-32 values,
+		then renames a same-directory temporary file into place.  Destination
+		paths are deliberately limited to mounted filesystems below /mnt/.
+
+if SYSTEM_P2RECV
+
+config SYSTEM_P2RECV_PROGNAME
+	string "Program name"
+	default "p2recv"
+
+config SYSTEM_P2RECV_PRIORITY
+	int "p2recv task priority"
+	default 100
+
+config SYSTEM_P2RECV_STACKSIZE
+	int "p2recv task stack size"
+	default 3072
+
+config SYSTEM_P2RECV_MAXSIZE
+	int "Maximum accepted file size"
+	default 67108864
+	range 1 2147483647
+	---help---
+		Reject larger files before creating a temporary file.  The receiver
+		streams through a fixed 256-byte buffer, so this limit does not reserve
+		RAM.  The default permits provisioning larger SD-backed modules while
+		remaining within the protocol's 32-bit length field.
+
+config SYSTEM_P2RECV_TIMEOUT_MS
+	int "Per-read serial timeout (milliseconds)"
+	default 10000
+	range 100 600000
+	---help---
+		Maximum time to wait for progress while reading a frame header or
+		payload.  A timeout removes the temporary file and leaves any existing
+		destination untouched.
+
+endif

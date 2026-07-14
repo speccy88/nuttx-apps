@@ -1,0 +1,9 @@
+############################################################################
+# apps/system/p2bank/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifeq ($(CONFIG_SYSTEM_P2BANK),y)
+CONFIGURED_APPS += $(APPDIR)/system/p2bank
+endif
