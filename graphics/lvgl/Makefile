@@ -82,6 +82,19 @@ $(LVGL_UNPACKNAME): $(LVGL_TARBALL)
 	$(Q) touch $(LVGL_UNPACKNAME)
 	$(ECHO_END)
 
+ifeq ($(CONFIG_ARCH_P2),y)
+$(LVGL_UNPACKNAME)/.nuttx-p2-abi-patched: $(LVGL_UNPACKNAME) \
+		0001-p2-align-lv-color-for-abi.patch \
+		0002-nuttx-disable-pthread-stack-check.patch
+	$(Q) patch -p1 -d $(LVGL_UNPACKNAME) < \
+		0001-p2-align-lv-color-for-abi.patch
+	$(Q) patch -p1 -d $(LVGL_UNPACKNAME) < \
+		0002-nuttx-disable-pthread-stack-check.patch
+	$(Q) touch $@
+
+context:: $(LVGL_UNPACKNAME)/.nuttx-p2-abi-patched
+endif
+
 # Download and unpack tarball if no git repo found
 ifeq ($(wildcard $(LVGL_UNPACKNAME)/.git),)
 context:: $(LVGL_UNPACKNAME)

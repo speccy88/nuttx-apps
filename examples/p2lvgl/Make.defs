@@ -1,0 +1,9 @@
+############################################################################
+# apps/examples/p2lvgl/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+############################################################################
+
+ifneq ($(CONFIG_EXAMPLES_P2LVGL),)
+CONFIGURED_APPS += $(APPDIR)/examples/p2lvgl
+endif

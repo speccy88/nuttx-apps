@@ -1,0 +1,17 @@
+--- a/src/misc/lv_color.h
++++ b/src/misc/lv_color.h
+@@ -98,6 +98,13 @@ typedef struct {
+     uint8_t blue;
+     uint8_t green;
+     uint8_t red;
+-} lv_color_t;
++}
++#if defined(__NuttX__) && defined(CONFIG_ARCH_P2)
++/* P2LLVM requires aggregates passed by value to preserve long stack
++ * alignment.  The logical color remains RGB888; only its ABI size changes.
++ */
++__attribute__((aligned(4)))
++#endif
++lv_color_t;
+ 
+ typedef struct {

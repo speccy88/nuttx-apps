@@ -17,6 +17,15 @@ config SYSTEM_TERMCURSES_VT100
 	depends on SYSTEM_TERMCURSES
 	default y
 
+config SYSTEM_TERMCURSES_ESCDELAY_MS
+	int "Escape sequence timeout (milliseconds)"
+	depends on SYSTEM_TERMCURSES_VT100
+	range 1 1000
+	default 30
+	---help---
+		Maximum time to wait for bytes that follow ESC.  USB and network
+		terminals may split one cursor-key sequence across several reads.
+
 config SYSTEM_TERMCURSES_VT100_OSX_ALT_CODES
 	bool "Support Mac OSX ALT keycodes in vt100 emulation."
 	depends on SYSTEM_TERMCURSES_VT100

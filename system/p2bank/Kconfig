@@ -1,0 +1,41 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_P2BANK
+	bool "Propeller 2 PSRAM bank launcher"
+	default n
+	depends on ARCH_BOARD_P2_EC32MB
+	depends on P2_EC32MB_PSRAM
+	depends on BUILTIN && NSH_BUILTIN_APPS
+	---help---
+		Add the p2bank manager command and its berry convenience alias.  The
+		launcher streams a bounded raw bank image from onboard flash into an
+		explicit PSRAM staging window, verifies a readback CRC-32, and then asks
+		the PSRAM service cog to replace Hub and warm-start the bank.  External
+		PSRAM remains a block-transfer store, not native heap or code memory.
+
+if SYSTEM_P2BANK
+
+config SYSTEM_P2BANK_PRIORITY
+	int "p2bank task priority"
+	default 100
+
+config SYSTEM_P2BANK_STACKSIZE
+	int "p2bank task stack size"
+	default 3072
+
+config SYSTEM_P2BANK_BUFSIZE
+	int "p2bank streaming buffer size"
+	default 4096
+	range 256 16384
+	---help---
+		Allocate this temporary Hub buffer only while staging and verifying a
+		bank.  It is not a permanent BSS reservation.
+
+config SYSTEM_P2BANK_DEFAULT_BANK
+	string "Default Berry bank image"
+	default "/mnt/flash/banks/berry.bin"
+
+endif

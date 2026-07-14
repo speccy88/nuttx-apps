@@ -1,0 +1,43 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config SYSTEM_P2BERRYBANK
+	bool "Propeller 2 Berry/LVGL bank entrypoint"
+	default n
+	depends on ARCH_BOARD_P2_EC32MB
+	depends on BOARDCTL && BOARDCTL_RESET && BOARD_LATE_INITIALIZE
+	depends on INTERPRETERS_BERRY=y && INTERPRETERS_BERRY_LVGL
+	depends on MMCSD_SPI && FS_FAT
+	---help---
+		Add the init entrypoint for the nonresident Berry/LVGL application
+		bank.  It validates the fixed P2 bank handoff, mounts the existing SD
+		FAT filesystem at /mnt/sd without formatting, runs the selected Berry
+		requested script or an interactive REPL, then resets to the
+		flash-resident manager.  The bank-only quit([status]) native exits the
+		REPL without enabling Berry's larger OS module.
+
+if SYSTEM_P2BERRYBANK
+
+config SYSTEM_P2BERRYBANK_PROGNAME
+	string "Program name"
+	default "p2berrybank"
+
+config SYSTEM_P2BERRYBANK_PRIORITY
+	int "p2berrybank task priority"
+	default 100
+
+config SYSTEM_P2BERRYBANK_STACKSIZE
+	int "p2berrybank task stack size"
+	default 16384
+
+config SYSTEM_P2BERRYBANK_DEFAULT_SCRIPT
+	string "Invalid-handoff recovery script"
+	default "/mnt/sd/berry-p2/lvgl_widgets.be"
+	---help---
+		Run this script only for direct or otherwise invalid-handoff recovery.
+		A valid manager handoff with no script intentionally starts the Berry
+		REPL.  If this recovery file is absent, p2berrybank also starts the REPL.
+
+endif

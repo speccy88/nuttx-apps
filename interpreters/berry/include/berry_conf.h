@@ -37,43 +37,105 @@
  ****************************************************************************/
 
 #define BE_DEBUG                        0
-#define BE_INTGER_TYPE                  2
-#define BE_USE_SINGLE_FLOAT             0
-#define BE_BYTES_MAX_SIZE               (32 * 1024)
-#define BE_USE_PRECOMPILED_OBJECT       1
-#define BE_DEBUG_SOURCE_FILE            1
-#define BE_DEBUG_RUNTIME_INFO           1
-#define BE_DEBUG_VAR_INFO               1
-#define BE_USE_PERF_COUNTERS            1
-#define BE_VM_OBSERVABILITY_SAMPLING    20
-#define BE_STACK_TOTAL_MAX              20000
-#define BE_STACK_FREE_MIN               10
-#define BE_STACK_START                  50
-#define BE_CONST_SEARCH_SIZE            50
-#define BE_USE_STR_HASH_CACHE           0
-#define BE_USE_FILE_SYSTEM              1
-#define BE_USE_SCRIPT_COMPILER          1
-#define BE_USE_BYTECODE_SAVER           1
-#define BE_USE_BYTECODE_LOADER          1
-#define BE_USE_SHARED_LIB               0
-#define BE_USE_OVERLOAD_HASH            1
-#define BE_USE_DEBUG_HOOK               0
-#define BE_USE_DEBUG_GC                 0
-#define BE_USE_DEBUG_STACK              0
-#define BE_USE_MEM_ALIGNED              0
 
-#define BE_USE_STRING_MODULE            1
-#define BE_USE_JSON_MODULE              1
-#define BE_USE_MATH_MODULE              1
-#define BE_USE_TIME_MODULE              1
-#define BE_USE_OS_MODULE                1
-#define BE_USE_GLOBAL_MODULE            1
-#define BE_USE_SYS_MODULE               1
-#define BE_USE_DEBUG_MODULE             1
-#define BE_USE_GC_MODULE                1
-#define BE_USE_SOLIDIFY_MODULE          1
-#define BE_USE_INTROSPECT_MODULE        1
-#define BE_USE_STRICT_MODULE            1
+#ifdef CONFIG_ARCH_P2
+
+/* P2 Hub RAM is the only byte-addressable C heap.  Keep Berry objects small
+ * and avoid 64-bit/double/libm-heavy paths; external PSRAM remains an
+ * explicit block device and is deliberately not used by malloc().
+ */
+
+#  define BE_INTGER_TYPE                1
+#  define BE_USE_SINGLE_FLOAT           1
+#  define BE_BYTES_MAX_SIZE             (4 * 1024)
+#  define BE_USE_PRECOMPILED_OBJECT     1
+#  define BE_DEBUG_SOURCE_FILE          0
+#  define BE_DEBUG_RUNTIME_INFO         0
+#  define BE_DEBUG_VAR_INFO             0
+#  define BE_USE_PERF_COUNTERS          0
+#  define BE_VM_OBSERVABILITY_SAMPLING  18
+#  define BE_STACK_TOTAL_MAX            2048
+#  define BE_STACK_FREE_MIN             8
+#  define BE_STACK_START                32
+#  define BE_CONST_SEARCH_SIZE          32
+#  define BE_USE_STR_HASH_CACHE         0
+#  define BE_USE_FILE_SYSTEM            1
+#  define BE_USE_SCRIPT_COMPILER        1
+#  define BE_USE_BYTECODE_SAVER         1
+#  define BE_USE_BYTECODE_LOADER        0
+#  define BE_USE_SHARED_LIB             0
+#  define BE_USE_OVERLOAD_HASH          0
+#  define BE_USE_DEBUG_HOOK             0
+#  define BE_USE_DEBUG_GC               0
+#  define BE_USE_DEBUG_STACK            0
+#  define BE_USE_MEM_ALIGNED            0
+
+#  define BE_USE_STRING_MODULE          0
+#  define BE_USE_JSON_MODULE            0
+#  define BE_USE_MATH_MODULE            0
+#  define BE_USE_TIME_MODULE            0
+#  define BE_USE_OS_MODULE              0
+#  define BE_USE_GLOBAL_MODULE          0
+#  define BE_USE_SYS_MODULE             0
+#  define BE_USE_DEBUG_MODULE           0
+#  define BE_USE_GC_MODULE              0
+#  define BE_USE_SOLIDIFY_MODULE        0
+#  define BE_USE_INTROSPECT_MODULE      0
+#  define BE_USE_STRICT_MODULE          0
+#  define BE_USE_FILE_CLASS             0
+#  define BE_USE_BYTES_CLASS            0
+
+#else
+
+#  define BE_INTGER_TYPE                2
+#  define BE_USE_SINGLE_FLOAT           0
+#  define BE_BYTES_MAX_SIZE             (32 * 1024)
+#  define BE_USE_PRECOMPILED_OBJECT     1
+#  define BE_DEBUG_SOURCE_FILE          1
+#  define BE_DEBUG_RUNTIME_INFO         1
+#  define BE_DEBUG_VAR_INFO             1
+#  define BE_USE_PERF_COUNTERS          1
+#  define BE_VM_OBSERVABILITY_SAMPLING  20
+#  define BE_STACK_TOTAL_MAX            20000
+#  define BE_STACK_FREE_MIN             10
+#  define BE_STACK_START                50
+#  define BE_CONST_SEARCH_SIZE          50
+#  define BE_USE_STR_HASH_CACHE         0
+#  define BE_USE_FILE_SYSTEM            1
+#  define BE_USE_SCRIPT_COMPILER        1
+#  define BE_USE_BYTECODE_SAVER         1
+#  define BE_USE_BYTECODE_LOADER        1
+#  define BE_USE_SHARED_LIB             0
+#  define BE_USE_OVERLOAD_HASH          1
+#  define BE_USE_DEBUG_HOOK             0
+#  define BE_USE_DEBUG_GC               0
+#  define BE_USE_DEBUG_STACK            0
+#  define BE_USE_MEM_ALIGNED            0
+
+#  define BE_USE_JSON_MODULE            1
+#  define BE_USE_MATH_MODULE            1
+#  define BE_USE_TIME_MODULE            1
+#  define BE_USE_OS_MODULE              1
+#  define BE_USE_GLOBAL_MODULE          1
+#  define BE_USE_SYS_MODULE             1
+#  define BE_USE_DEBUG_MODULE           1
+#  define BE_USE_GC_MODULE              1
+#  define BE_USE_SOLIDIFY_MODULE        1
+#  define BE_USE_INTROSPECT_MODULE      1
+#  define BE_USE_STRICT_MODULE          1
+
+#endif
+
+/* The Berry constant-object generator scans only literal `#define` lines and
+ * does not evaluate the C preprocessor.  P2 uses berry_coc_p2.h; keep these
+ * non-P2 defaults in the literal form expected by the generic generator.
+ */
+
+#ifndef CONFIG_ARCH_P2
+#define BE_USE_STRING_MODULE 1
+#define BE_USE_FILE_CLASS 1
+#define BE_USE_BYTES_CLASS 1
+#endif
 
 #define BE_EXPLICIT_ABORT               abort
 #define BE_EXPLICIT_EXIT                exit

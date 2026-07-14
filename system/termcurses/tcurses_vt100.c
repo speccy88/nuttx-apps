@@ -57,6 +57,10 @@
 #define KEY_HOME        0x106  /* home key */
 #define KEY_F0          0x108  /* function keys; 64 reserved */
 
+#ifndef CONFIG_SYSTEM_TERMCURSES_ESCDELAY_MS
+#  define CONFIG_SYSTEM_TERMCURSES_ESCDELAY_MS 30
+#endif
+
 #ifdef CONFIG_TERMINFO_INCLUDE_NAME
 #define TINFO_ENTRY(n, d, c)  n, d, c
 #else
@@ -953,6 +957,29 @@ static int tcurses_vt100_setcolors(FAR struct termcurses_s *dev,
 }
 
 /****************************************************************************
+ * Preserve bytes received while querying the terminal size
+ ****************************************************************************/
+
+static void tcurses_vt100_savekeys(FAR struct tcurses_vt100_s *priv,
+                                   FAR const char *buffer, int buflen)
+{
+  size_t available;
+  size_t copylen;
+
+  if (buflen <= 0 ||
+      (size_t)priv->keycount >= sizeof(priv->keybuf) - 1)
+    {
+      return;
+    }
+
+  available = sizeof(priv->keybuf) - 1 - priv->keycount;
+  copylen = (size_t)buflen < available ? (size_t)buflen : available;
+  memcpy(&priv->keybuf[priv->keycount], buffer, copylen);
+  priv->keycount += (int)copylen;
+  priv->keybuf[priv->keycount] = '\0';
+}
+
+/****************************************************************************
  * Get windows size from terminal emulator connected to serial port
  ****************************************************************************/
 
@@ -961,18 +988,20 @@ static int tcurses_vt100_getwinsize(FAR struct termcurses_s *dev,
 {
   FAR struct tcurses_vt100_s *priv;
   int  ret = -ENOSYS;
-  int  fd;
+  int  in_fd;
+  int  out_fd;
   char resp[64];
   int  flags;
   int  delay;
   int  len;
 
-  priv = (FAR struct tcurses_vt100_s *)dev;
-  fd   = priv->out_fd;
+  priv   = (FAR struct tcurses_vt100_s *)dev;
+  in_fd  = priv->in_fd;
+  out_fd = priv->out_fd;
 
   /* First try the TIOCGWINSZ ioctl */
 
-  ret = ioctl(fd, TIOCGWINSZ, (unsigned long) winsz);
+  ret = ioctl(out_fd, TIOCGWINSZ, (unsigned long) winsz);
   if (ret == OK)
     {
       return OK;
@@ -980,7 +1009,7 @@ static int tcurses_vt100_getwinsize(FAR struct termcurses_s *dev,
 
   /* Write command to get window size */
 
-  ret = write(fd, g_getwinsize, strlen(g_getwinsize));
+  ret = write(out_fd, g_getwinsize, strlen(g_getwinsize));
   if (ret <= 0)
     {
       return ret;
@@ -988,8 +1017,16 @@ static int tcurses_vt100_getwinsize(FAR struct termcurses_s *dev,
 
   /* Perform a non-blocking read to get return data */
 
-  flags = fcntl(fd, F_GETFL);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  flags = fcntl(in_fd, F_GETFL);
+  if (flags < 0)
+    {
+      return -errno;
+    }
+
+  if (fcntl(in_fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    {
+      return -errno;
+    }
 
   delay = 0;
   len   = 0;
@@ -1000,43 +1037,83 @@ static int tcurses_vt100_getwinsize(FAR struct termcurses_s *dev,
     {
       /* Perform a read */
 
-      ret = read(fd, &resp[len], sizeof(resp) - len);
+      ret = read(in_fd, &resp[len],
+                 sizeof(priv->keybuf) - 1 - len);
       if (ret > 0)
         {
           len += ret;
         }
 
-      /* Test for completion of read */
+      /* Search for ESC[row;columnR.  Bytes outside that response are user
+       * input and must remain available to getkeycode().
+       */
 
-      if (len > 0 && resp[len - 1] == 'R')
+      if (len > 0)
         {
-          /* Get the terminal size from the response */
+          int start;
 
-          if (resp[0] == '\x1b' && resp[1] == '[')
+          for (start = 0; start + 2 < len; start++)
             {
-              int  x;
-              char ch;
+              int row = 0;
+              int col = 0;
+              int pos;
+              int digits;
 
-              resp[len] = 0;
-              x = 2;
-              while (resp[x] != ';' && resp[x] != 0)
+              if (resp[start] != '\x1b' || resp[start + 1] != '[')
                 {
-                  x++;
+                  continue;
                 }
 
-              ch = resp[x];
-              resp[x] = 0;
-              winsz->ws_row = atoi(&resp[2]);
-              if (ch == ';')
+              pos = start + 2;
+              for (digits = 0; pos < len && resp[pos] >= '0' &&
+                   resp[pos] <= '9'; digits++, pos++)
                 {
-                  winsz->ws_col = atoi(&resp[x + 1]);
+                  if (digits >= 5)
+                    {
+                      digits = 0;
+                      break;
+                    }
+
+                  row = row * 10 + resp[pos] - '0';
                 }
 
-              /* Change back to original block/non-block mode */
+              if (digits == 0 || row > UINT16_MAX || pos >= len ||
+                  resp[pos++] != ';')
+                {
+                  continue;
+                }
 
-              fcntl(fd, F_SETFL, flags);
+              for (digits = 0; pos < len && resp[pos] >= '0' &&
+                   resp[pos] <= '9'; digits++, pos++)
+                {
+                  if (digits >= 5)
+                    {
+                      digits = 0;
+                      break;
+                    }
+
+                  col = col * 10 + resp[pos] - '0';
+                }
+
+              if (digits == 0 || col > UINT16_MAX || pos >= len ||
+                  resp[pos] != 'R' || row <= 0 || col <= 0)
+                {
+                  continue;
+                }
+
+              winsz->ws_row = row;
+              winsz->ws_col = col;
+              tcurses_vt100_savekeys(priv, resp, start);
+              tcurses_vt100_savekeys(priv, &resp[pos + 1],
+                                     len - pos - 1);
+              fcntl(in_fd, F_SETFL, flags);
               return OK;
             }
+        }
+
+      if ((size_t)len == sizeof(priv->keybuf) - 1)
+        {
+          break;
         }
 
       /* Sleep a bit to allow data to arrive */
@@ -1045,7 +1122,8 @@ static int tcurses_vt100_getwinsize(FAR struct termcurses_s *dev,
       delay++;
     }
 
-  fcntl(fd, F_SETFL, flags);
+  tcurses_vt100_savekeys(priv, resp, len);
+  fcntl(in_fd, F_SETFL, flags);
   return -ENOSYS;
 }
 
@@ -1162,16 +1240,6 @@ static int tcurses_vt100_getkeycode(FAR struct termcurses_s *dev,
   priv = (FAR struct tcurses_vt100_s *)dev;
   fd   = priv->in_fd;
 
-  /* Watch stdin (fd 0) to see when it has input. */
-
-  FD_ZERO(&rfds);
-  FD_SET(0, &rfds);
-
-  /* Wait up to 1000us for next character after ESC */
-
-  tv.tv_sec     = 0;
-  tv.tv_usec    = 1000;
-
   /* Loop until we have a valid key code, taking escape sequences
    * into account
    */
@@ -1237,7 +1305,19 @@ static int tcurses_vt100_getkeycode(FAR struct termcurses_s *dev,
                */
 
               priv->keycount = 0;
-              ret = select(1, &rfds, NULL, NULL, &tv);
+
+              /* select() modifies both the descriptor set and timeout, so
+               * initialize them for every fragmented escape sequence.  Use
+               * the input descriptor supplied by the caller rather than
+               * assuming stdin.
+               */
+
+              FD_ZERO(&rfds);
+              FD_SET(fd, &rfds);
+              tv.tv_sec = CONFIG_SYSTEM_TERMCURSES_ESCDELAY_MS / 1000;
+              tv.tv_usec =
+                (CONFIG_SYSTEM_TERMCURSES_ESCDELAY_MS % 1000) * 1000;
+              ret = select(fd + 1, &rfds, NULL, NULL, &tv);
               if (ret > 0)
                 {
                   continue;

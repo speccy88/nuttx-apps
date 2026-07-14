@@ -83,6 +83,12 @@
 #  define P2STORAGE_SD_PARTITION_DEVPATH "/dev/p2sd1"
 #  define P2STORAGE_SD_PARTITION_START   UINT32_C(2048)
 #  define P2STORAGE_FAT32_PARTITION_TYPE 0x0c
+#  define P2STORAGE_FAT32_RESERVED_SECTORS UINT16_C(32)
+#  define P2STORAGE_FAT32_FSINFO_SECTOR    UINT16_C(1)
+#  define P2STORAGE_FAT32_BACKUP_SECTOR    UINT16_C(6)
+#  define P2STORAGE_FAT32_VOLUME_ID        UINT32_C(0x50325344)
+#  define P2STORAGE_FAT32_MIN_CLUSTERS     UINT32_C(65524)
+#  define P2STORAGE_FAT32_MAX_CLUSTERS     UINT32_C(0x0fffffed)
 #endif
 
 #if CONFIG_TESTING_P2STORAGE_RECORD_SIZE != 256
@@ -806,8 +812,9 @@ static int p2storage_verify_persistence(
   return 0;
 }
 
-static int p2storage_sd_read_sector(int fd, uint64_t nsectors,
-                                    uint64_t sector)
+static int p2storage_sd_read_sector_into(int fd, uint64_t nsectors,
+                                         uint64_t sector,
+                                         FAR uint8_t *buffer)
 {
   uint64_t byte_offset;
   off_t expected;
@@ -838,8 +845,14 @@ static int p2storage_sd_read_sector(int fd, uint64_t nsectors,
       return -EIO;
     }
 
-  return p2storage_read_all(fd, g_io_buffer,
-                            P2STORAGE_SD_SECTOR_SIZE);
+  return p2storage_read_all(fd, buffer, P2STORAGE_SD_SECTOR_SIZE);
+}
+
+static int p2storage_sd_read_sector(int fd, uint64_t nsectors,
+                                    uint64_t sector)
+{
+  return p2storage_sd_read_sector_into(fd, nsectors, sector,
+                                       g_io_buffer);
 }
 
 static int p2storage_sd_fat_entry(int fd, uint64_t nsectors,
@@ -1285,69 +1298,81 @@ static int p2storage_auth(FAR const char *magic)
          strcmp(magic, P2STORAGE_DESTRUCTIVE_MAGIC) == 0 ? 0 : -EACCES;
 }
 
-static int p2storage_sd_geometry(FAR const char *devpath,
-                                FAR struct geometry *geometry)
+static int p2storage_sd_geometry_fd(int fd,
+                                   FAR struct geometry *geometry)
 {
-  int ret;
-  int fd;
-
-  fd = open(devpath, O_RDWR);
-  if (fd < 0)
-    {
-      return p2storage_errno();
-    }
-
   memset(geometry, 0, sizeof(*geometry));
   if (ioctl(fd, BIOC_GEOMETRY,
             (unsigned long)((uintptr_t)geometry)) < 0)
     {
-      ret = p2storage_errno();
-    }
-  else if (!geometry->geo_available || !geometry->geo_writeenabled)
-    {
-      ret = -ENODEV;
-    }
-  else
-    {
-      ret = 0;
+      return p2storage_errno();
     }
 
-  if (close(fd) < 0 && ret == 0)
+  if (!geometry->geo_available || !geometry->geo_writeenabled)
     {
-      ret = p2storage_errno();
+      return -ENODEV;
     }
 
-  return ret;
+  return 0;
 }
 
-static int p2storage_sd_write_mbr(
-  FAR const struct p2storage_medium_s *medium,
-  FAR uint32_t *partition_sectors)
+static int p2storage_sd_partition_geometry(int fd,
+                                           FAR uint64_t *nsectors,
+                                           FAR uint32_t *partition_sectors)
 {
   struct geometry geometry;
-  FAR uint8_t *entry;
-  uint64_t nsectors;
-  uint32_t count;
+  uint64_t total_sectors;
   int ret;
-  int fd;
 
-  ret = p2storage_sd_geometry(medium->devpath, &geometry);
+  ret = p2storage_sd_geometry_fd(fd, &geometry);
   if (ret < 0)
     {
       return ret;
     }
 
-  nsectors = geometry.geo_nsectors;
+  total_sectors = geometry.geo_nsectors;
   if (geometry.geo_sectorsize != P2STORAGE_SD_SECTOR_SIZE ||
-      nsectors <= P2STORAGE_SD_PARTITION_START ||
-      nsectors - P2STORAGE_SD_PARTITION_START > UINT32_MAX)
+      total_sectors <= P2STORAGE_SD_PARTITION_START ||
+      total_sectors - P2STORAGE_SD_PARTITION_START > UINT32_MAX)
     {
       return -EINVAL;
     }
 
-  count = (uint32_t)(nsectors - P2STORAGE_SD_PARTITION_START);
-  memset(g_io_buffer, 0, P2STORAGE_SD_SECTOR_SIZE);
-  entry = &g_io_buffer[P2STORAGE_MBR_PARTITION_OFFSET];
+  *nsectors = total_sectors;
+  *partition_sectors =
+    (uint32_t)(total_sectors - P2STORAGE_SD_PARTITION_START);
+  return 0;
+}
+
+static int p2storage_sd_geometry_unchanged(int fd,
+                                           uint64_t expected_nsectors)
+{
+  struct geometry geometry;
+  int ret;
+
+  ret = p2storage_sd_geometry_fd(fd, &geometry);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (geometry.geo_mediachanged ||
+      geometry.geo_sectorsize != P2STORAGE_SD_SECTOR_SIZE ||
+      (uint64_t)geometry.geo_nsectors != expected_nsectors)
+    {
+      return -EAGAIN;
+    }
+
+  return 0;
+}
+
+static void p2storage_sd_build_mbr(FAR uint8_t *sector,
+                                    uint32_t partition_sectors)
+{
+  FAR uint8_t *entry;
+
+  memset(sector, 0, P2STORAGE_SD_SECTOR_SIZE);
+  entry = &sector[P2STORAGE_MBR_PARTITION_OFFSET];
 
   /* The P2 ROM accepts only partition zero with state 0x00/0x80 and FAT32
    * type 0x0b/0x0c.  Use a conventional active FAT32-LBA partition aligned
@@ -1364,9 +1389,91 @@ static int p2storage_sd_write_mbr(
   entry[6] = 0xff;
   entry[7] = 0xff;
   p2storage_put_u32le(&entry[8], P2STORAGE_SD_PARTITION_START);
-  p2storage_put_u32le(&entry[12], count);
-  g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET] = 0x55;
-  g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET + 1] = 0xaa;
+  p2storage_put_u32le(&entry[12], partition_sectors);
+  sector[P2STORAGE_MBR_SIGNATURE_OFFSET] = 0x55;
+  sector[P2STORAGE_MBR_SIGNATURE_OFFSET + 1] = 0xaa;
+}
+
+static int p2storage_sd_write_mbr_fd(int fd, uint64_t nsectors,
+                                     uint32_t partition_sectors,
+                                     bool revalidate_vbr)
+{
+  FAR uint8_t *vbr_snapshot = g_io_buffer;
+  FAR uint8_t *expected = &g_io_buffer[P2STORAGE_SD_SECTOR_SIZE];
+  FAR uint8_t *current_vbr =
+    &g_io_buffer[2 * P2STORAGE_SD_SECTOR_SIZE];
+  off_t position;
+  int ret;
+
+  /* A removable card cannot be locked atomically through this block API.
+   * Re-query the already-open device and, for repair, compare the validated
+   * VBR snapshot immediately before the only raw write.  A card-change
+   * indication, geometry drift, or content drift aborts without touching
+   * LBA0.
+   */
+
+  ret = p2storage_sd_geometry_unchanged(fd, nsectors);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (revalidate_vbr)
+    {
+      ret = p2storage_sd_read_sector_into(
+        fd, nsectors, P2STORAGE_SD_PARTITION_START, current_vbr);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      if (memcmp(vbr_snapshot, current_vbr,
+                 P2STORAGE_SD_SECTOR_SIZE) != 0)
+        {
+          return -EAGAIN;
+        }
+    }
+
+  p2storage_sd_build_mbr(expected, partition_sectors);
+  position = lseek(fd, 0, SEEK_SET);
+  if (position < 0)
+    {
+      return p2storage_errno();
+    }
+  else if (position != 0)
+    {
+      return -EIO;
+    }
+
+  ret = p2storage_write_all(fd, expected, P2STORAGE_SD_SECTOR_SIZE);
+  if (ret == 0 && fsync(fd) < 0)
+    {
+      ret = p2storage_errno();
+    }
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = p2storage_sd_read_sector_into(fd, nsectors, 0, g_io_buffer);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  return memcmp(g_io_buffer, expected, P2STORAGE_SD_SECTOR_SIZE) == 0 ?
+         0 : -EIO;
+}
+
+static int p2storage_sd_write_mbr(
+  FAR const struct p2storage_medium_s *medium,
+  FAR uint32_t *partition_sectors)
+{
+  uint64_t nsectors;
+  uint32_t count;
+  int ret;
+  int fd;
 
   fd = open(medium->devpath, O_RDWR);
   if (fd < 0)
@@ -1374,8 +1481,12 @@ static int p2storage_sd_write_mbr(
       return p2storage_errno();
     }
 
-  ret = p2storage_write_all(fd, g_io_buffer,
-                            P2STORAGE_SD_SECTOR_SIZE);
+  ret = p2storage_sd_partition_geometry(fd, &nsectors, &count);
+  if (ret == 0)
+    {
+      ret = p2storage_sd_write_mbr_fd(fd, nsectors, count, false);
+    }
+
   if (close(fd) < 0 && ret == 0)
     {
       ret = p2storage_errno();
@@ -1389,13 +1500,254 @@ static int p2storage_sd_write_mbr(
   return ret;
 }
 
+static int p2storage_sd_validate_mkfatfs(int fd, uint64_t nsectors,
+                                         uint32_t partition_sectors)
+{
+  static const uint8_t zero_reserved[14] =
+  {
+    0
+  };
+
+  static const uint8_t volume_label[11] =
+  {
+    'P', '2', 'S', 'T', 'O', 'R', 'A', 'G', 'E', ' ', ' '
+  };
+
+  FAR uint8_t *primary = g_io_buffer;
+  FAR uint8_t *scratch = &g_io_buffer[P2STORAGE_SD_SECTOR_SIZE];
+  uint64_t cluster_count;
+  uint64_t data_sectors;
+  uint64_t fat_entries;
+  uint64_t overhead;
+  uint32_t fat_sectors;
+  uint8_t sectors_per_cluster;
+  int ret;
+
+  ret = p2storage_sd_read_sector_into(fd, nsectors,
+                                      P2STORAGE_SD_PARTITION_START,
+                                      primary);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  sectors_per_cluster = primary[13];
+  fat_sectors = p2storage_get_u32le(&primary[36]);
+  if ((uint64_t)P2STORAGE_SD_PARTITION_START + partition_sectors !=
+        nsectors ||
+      primary[0] != 0xeb || primary[1] != 0x58 || primary[2] != 0x90 ||
+      memcmp(&primary[3], "NUTTX   ", 8) != 0 ||
+      p2storage_get_u16le(&primary[11]) != P2STORAGE_SD_SECTOR_SIZE ||
+      sectors_per_cluster == 0 || sectors_per_cluster > 128 ||
+      (sectors_per_cluster & (sectors_per_cluster - 1)) != 0 ||
+      p2storage_get_u16le(&primary[14]) !=
+        P2STORAGE_FAT32_RESERVED_SECTORS ||
+      primary[16] != 2 ||
+      p2storage_get_u16le(&primary[17]) != 0 ||
+      p2storage_get_u16le(&primary[19]) != 0 ||
+      primary[21] != 0xf8 ||
+      p2storage_get_u16le(&primary[22]) != 0 ||
+      p2storage_get_u16le(&primary[24]) != 63 ||
+      p2storage_get_u16le(&primary[26]) != 255 ||
+      p2storage_get_u32le(&primary[28]) !=
+        P2STORAGE_SD_PARTITION_START ||
+      p2storage_get_u32le(&primary[32]) != partition_sectors ||
+      fat_sectors == 0 ||
+      p2storage_get_u16le(&primary[40]) != 0 ||
+      p2storage_get_u16le(&primary[42]) != 0 ||
+      p2storage_get_u32le(&primary[44]) != 2 ||
+      p2storage_get_u16le(&primary[48]) !=
+        P2STORAGE_FAT32_FSINFO_SECTOR ||
+      p2storage_get_u16le(&primary[50]) !=
+        P2STORAGE_FAT32_BACKUP_SECTOR ||
+      memcmp(&primary[52], zero_reserved, sizeof(zero_reserved)) != 0 ||
+      primary[66] != 0x29 ||
+      p2storage_get_u32le(&primary[67]) !=
+        P2STORAGE_FAT32_VOLUME_ID ||
+      memcmp(&primary[71], volume_label, sizeof(volume_label)) != 0 ||
+      memcmp(&primary[82], "FAT32   ", 8) != 0 ||
+      primary[P2STORAGE_MBR_SIGNATURE_OFFSET] != 0x55 ||
+      primary[P2STORAGE_MBR_SIGNATURE_OFFSET + 1] != 0xaa)
+    {
+      return -EINVAL;
+    }
+
+  overhead = P2STORAGE_FAT32_RESERVED_SECTORS +
+             UINT64_C(2) * fat_sectors;
+  if (overhead >= partition_sectors)
+    {
+      return -EINVAL;
+    }
+
+  data_sectors = partition_sectors - overhead;
+  cluster_count = data_sectors / sectors_per_cluster;
+  fat_entries = (uint64_t)fat_sectors *
+                (P2STORAGE_SD_SECTOR_SIZE / sizeof(uint32_t));
+  if (cluster_count < P2STORAGE_FAT32_MIN_CLUSTERS ||
+      cluster_count > P2STORAGE_FAT32_MAX_CLUSTERS ||
+      cluster_count + 3 > fat_entries)
+    {
+      return -EINVAL;
+    }
+
+  /* mkfatfs writes an exact backup of the VBR and a signed FSINFO sector.
+   * Those immutable sectors distinguish this layout from a merely plausible
+   * FAT32 BPB.  FSINFO free-space hints are intentionally not compared: they
+   * legitimately change as files are added to the volume.
+   */
+
+  ret = p2storage_sd_read_sector_into(
+    fd, nsectors,
+    P2STORAGE_SD_PARTITION_START + P2STORAGE_FAT32_BACKUP_SECTOR,
+    scratch);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (memcmp(primary, scratch, P2STORAGE_SD_SECTOR_SIZE) != 0)
+    {
+      return -EINVAL;
+    }
+
+  ret = p2storage_sd_read_sector_into(
+    fd, nsectors,
+    P2STORAGE_SD_PARTITION_START + P2STORAGE_FAT32_FSINFO_SECTOR,
+    scratch);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (p2storage_get_u32le(&scratch[0]) != UINT32_C(0x41615252) ||
+      p2storage_get_u32le(&scratch[0x1e4]) != UINT32_C(0x61417272) ||
+      p2storage_get_u32le(&scratch[0x1fc]) != UINT32_C(0xaa550000))
+    {
+      return -EINVAL;
+    }
+
+  /* Detect a VBR change or same-size card swap during validation. */
+
+  ret = p2storage_sd_read_sector_into(fd, nsectors,
+                                      P2STORAGE_SD_PARTITION_START,
+                                      scratch);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  return memcmp(primary, scratch, P2STORAGE_SD_SECTOR_SIZE) == 0 ?
+         0 : -EAGAIN;
+}
+
+static int p2storage_sd_verify_rom_layout_fd(int fd, uint64_t nsectors,
+                                              uint32_t partition_sectors)
+{
+  FAR uint8_t *expected = &g_io_buffer[P2STORAGE_SD_SECTOR_SIZE];
+  int ret;
+
+  ret = p2storage_sd_read_sector_into(fd, nsectors, 0, g_io_buffer);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  p2storage_sd_build_mbr(expected, partition_sectors);
+  if (memcmp(g_io_buffer, expected, P2STORAGE_SD_SECTOR_SIZE) != 0)
+    {
+      return -EIO;
+    }
+
+  return p2storage_sd_validate_mkfatfs(fd, nsectors,
+                                       partition_sectors);
+}
+
+static int p2storage_sd_repair_mbr(
+  FAR const struct p2storage_medium_s *medium)
+{
+  uint64_t nsectors;
+  uint32_t partition_sectors;
+  int fd;
+  int ret;
+
+  /* Raw repair must never race a mounted FAT instance with cached
+   * metadata.
+   */
+
+  ret = p2storage_ensure_unmounted(medium);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  /* Repair only a missing or damaged MBR in front of the exact FAT32
+   * partition layout produced by sd-format.  Validate the existing VBR
+   * before writing sector zero so this command can never invent a
+   * partition over unrelated media.
+   */
+
+  fd = open(medium->devpath, O_RDWR);
+  if (fd < 0)
+    {
+      return p2storage_errno();
+    }
+
+  ret = p2storage_sd_partition_geometry(fd, &nsectors,
+                                        &partition_sectors);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  ret = p2storage_sd_validate_mkfatfs(fd, nsectors,
+                                      partition_sectors);
+  if (ret == 0)
+    {
+      ret = p2storage_sd_write_mbr_fd(fd, nsectors,
+                                      partition_sectors, true);
+    }
+
+  if (ret == 0)
+    {
+      ret = p2storage_sd_geometry_unchanged(fd, nsectors);
+    }
+
+  if (ret == 0)
+    {
+      ret = p2storage_sd_verify_rom_layout_fd(fd, nsectors,
+                                              partition_sectors);
+    }
+
+  if (ret == 0)
+    {
+      ret = p2storage_sd_geometry_unchanged(fd, nsectors);
+    }
+
+out:
+  if (close(fd) < 0 && ret == 0)
+    {
+      ret = p2storage_errno();
+    }
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  printf("P2STORAGE:SD:ROM-MBR:TYPE=0C:START=%" PRIu32
+         ":SECTORS=%" PRIu32 ":PASS\n",
+         P2STORAGE_SD_PARTITION_START, partition_sectors);
+  printf("P2STORAGE:SD:MBR-REPAIR:START=%" PRIu32
+         ":SECTORS=%" PRIu32 ":PASS\n",
+         P2STORAGE_SD_PARTITION_START, partition_sectors);
+  return 0;
+}
+
 static int p2storage_sd_verify_rom_layout(
   FAR const struct p2storage_medium_s *medium, uint32_t partition_sectors)
 {
-  FAR const uint8_t *entry;
-  off_t vbr_offset;
-  off_t position;
-  uint8_t sectors_per_cluster;
+  uint64_t nsectors;
+  uint32_t geometry_sectors;
   int ret;
   int fd;
 
@@ -1405,70 +1757,19 @@ static int p2storage_sd_verify_rom_layout(
       return p2storage_errno();
     }
 
-  ret = p2storage_read_all(fd, g_io_buffer,
-                           P2STORAGE_SD_SECTOR_SIZE);
-  if (ret < 0)
-    {
-      goto out;
-    }
-
-  entry = &g_io_buffer[P2STORAGE_MBR_PARTITION_OFFSET];
-  if (entry[0] != 0x80 ||
-      entry[4] != P2STORAGE_FAT32_PARTITION_TYPE ||
-      p2storage_get_u32le(&entry[8]) != P2STORAGE_SD_PARTITION_START ||
-      p2storage_get_u32le(&entry[12]) != partition_sectors ||
-      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET] != 0x55 ||
-      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET + 1] != 0xaa)
+  ret = p2storage_sd_partition_geometry(fd, &nsectors,
+                                        &geometry_sectors);
+  if (ret == 0 && geometry_sectors != partition_sectors)
     {
       ret = -EIO;
-      goto out;
     }
 
-  vbr_offset = (off_t)P2STORAGE_SD_PARTITION_START *
-               P2STORAGE_SD_SECTOR_SIZE;
-  position = lseek(fd, vbr_offset, SEEK_SET);
-  if (position < 0)
+  if (ret == 0)
     {
-      ret = p2storage_errno();
-      goto out;
-    }
-  else if (position != vbr_offset)
-    {
-      ret = -EIO;
-      goto out;
+      ret = p2storage_sd_verify_rom_layout_fd(fd, nsectors,
+                                              partition_sectors);
     }
 
-  ret = p2storage_read_all(fd, g_io_buffer,
-                           P2STORAGE_SD_SECTOR_SIZE);
-  if (ret < 0)
-    {
-      goto out;
-    }
-
-  sectors_per_cluster = g_io_buffer[13];
-  if (g_io_buffer[11] != 0x00 || g_io_buffer[12] != 0x02 ||
-      sectors_per_cluster == 0 ||
-      (sectors_per_cluster & (sectors_per_cluster - 1)) != 0 ||
-      g_io_buffer[16] != 2 ||
-      g_io_buffer[17] != 0 || g_io_buffer[18] != 0 ||
-      g_io_buffer[22] != 0 || g_io_buffer[23] != 0 ||
-      p2storage_get_u32le(&g_io_buffer[28]) !=
-        P2STORAGE_SD_PARTITION_START ||
-      p2storage_get_u32le(&g_io_buffer[32]) != partition_sectors ||
-      p2storage_get_u32le(&g_io_buffer[36]) == 0 ||
-      p2storage_get_u32le(&g_io_buffer[44]) != 2 ||
-      g_io_buffer[48] != 1 || g_io_buffer[49] != 0 ||
-      memcmp(&g_io_buffer[82], "FAT32   ", 8) != 0 ||
-      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET] != 0x55 ||
-      g_io_buffer[P2STORAGE_MBR_SIGNATURE_OFFSET + 1] != 0xaa)
-    {
-      ret = -EIO;
-      goto out;
-    }
-
-  ret = 0;
-
-out:
   if (close(fd) < 0 && ret == 0)
     {
       ret = p2storage_errno();
@@ -1521,7 +1822,7 @@ static int p2storage_sd_format(
   memcpy(format.ff_volumelabel, label, sizeof(label));
   format.ff_fattype = 32;
   format.ff_hidsec = P2STORAGE_SD_PARTITION_START;
-  format.ff_volumeid = UINT32_C(0x50325344);
+  format.ff_volumeid = P2STORAGE_FAT32_VOLUME_ID;
   if (mkfatfs(P2STORAGE_SD_PARTITION_DEVPATH, &format) < 0)
     {
       ret = p2storage_errno();
@@ -2309,6 +2610,8 @@ static void p2storage_usage(FAR const char *progname)
   printf("       %s flash-interrupt-verify 8HEX\n", progname);
   printf("       %s sd-format %s\n", progname,
          P2STORAGE_DESTRUCTIVE_MAGIC);
+  printf("       %s sd-mbr-repair %s\n", progname,
+         P2STORAGE_DESTRUCTIVE_MAGIC);
   printf("       %s sd-write %s 8HEX\n", progname,
          P2STORAGE_DESTRUCTIVE_MAGIC);
   printf("       %s sd-rename-delete %s 8HEX\n", progname,
@@ -2328,6 +2631,7 @@ static bool p2storage_is_destructive_command(FAR const char *command)
          strcmp(command, "flash-full") == 0 ||
          strcmp(command, "flash-interrupt-arm") == 0 ||
          strcmp(command, "sd-format") == 0 ||
+         strcmp(command, "sd-mbr-repair") == 0 ||
          strcmp(command, "sd-write") == 0 ||
          strcmp(command, "sd-rename-delete") == 0 ||
          strcmp(command, "sd-stress") == 0 ||
@@ -2411,8 +2715,10 @@ int main(int argc, FAR char *argv[])
     {
       bool is_format = strcmp(argv[1], "flash-format") == 0 ||
                        strcmp(argv[1], "sd-format") == 0;
+      bool has_sequence = !is_format &&
+                          strcmp(argv[1], "sd-mbr-repair") != 0;
 
-      if ((is_format && argc != 3) || (!is_format && argc != 4))
+      if ((!has_sequence && argc != 3) || (has_sequence && argc != 4))
         {
           return p2storage_fail("ARGS", -EINVAL);
         }
@@ -2423,7 +2729,7 @@ int main(int argc, FAR char *argv[])
           return p2storage_fail("AUTH", ret);
         }
 
-      if (!is_format &&
+      if (has_sequence &&
           p2storage_parse_sequence(argv[3], &sequence) < 0)
         {
           return p2storage_fail("SEQUENCE", -EINVAL);
@@ -2458,6 +2764,11 @@ int main(int argc, FAR char *argv[])
         {
           terminal = "SD-FORMAT";
           ret = p2storage_format(&g_sd);
+        }
+      else if (strcmp(argv[1], "sd-mbr-repair") == 0)
+        {
+          terminal = "SD-MBR-REPAIR";
+          ret = p2storage_sd_repair_mbr(&g_sd);
         }
       else if (strcmp(argv[1], "sd-write") == 0)
         {

@@ -1,0 +1,84 @@
+--- a/default/be_modtab.c
++++ b/default/be_modtab.c
+@@ -5,6 +5,8 @@
+ ** See Copyright Notice in the LICENSE file or at
+ ** https://github.com/Skiars/berry/blob/master/LICENSE
+ ********************************************************************/
++#include <nuttx/config.h>
++
+ #include "berry.h"
+ 
+ /* this file contains the declaration of the module table. */
+@@ -26,6 +28,10 @@
+ 
+ /* user-defined modules declare start */
+ 
++#ifdef CONFIG_INTERPRETERS_BERRY_LVGL
++be_extern_native_module(lv);
++#endif
++
+ /* user-defined modules declare end */
+ 
+ /* module list declaration */
+@@ -70,6 +76,10 @@
+     &be_native_module(undefined),
+     /* user-defined modules register start */
+ 
++#ifdef CONFIG_INTERPRETERS_BERRY_LVGL
++    &be_native_module(lv),
++#endif
++
+     /* user-defined modules register end */
+     NULL /* do not remove */
+ };
+--- a/default/berry.c
++++ b/default/berry.c
+@@ -5,6 +5,8 @@
+ ** See Copyright Notice in the LICENSE file or at
+ ** https://github.com/Skiars/berry/blob/master/LICENSE
+ ********************************************************************/
++#include <nuttx/config.h>
++
+ #include "berry.h"
+ #include "be_repl.h"
+ #include "be_vm.h"
+@@ -12,6 +14,10 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#ifdef CONFIG_INTERPRETERS_BERRY_LVGL
++extern void be_lvgl_cleanup(bvm *vm);
++#endif
++
+ /* using GNU/readline library */
+ #if defined(USE_READLINE_LIB)
+     #include <readline/readline.h>
+@@ -398,12 +404,28 @@
+     return load_script(vm, argc, argv, args);
+ }
+ 
++
++#ifdef CONFIG_INTERPRETERS_BERRY_LVGL_GLOBAL
++static void berry_preload_lvgl(bvm *vm)
++{
++    if (be_getmodule(vm, "lv")) {
++        be_setglobal(vm, "lv");
++        be_pop(vm, 1);
++    }
++}
++#endif
+ 
+ int main(int argc, char *argv[])
+ {
+     int res;
+     bvm *vm = be_vm_new(); /* create a virtual machine instance */
++#ifdef CONFIG_INTERPRETERS_BERRY_LVGL_GLOBAL
++    berry_preload_lvgl(vm);
++#endif
+     res = analysis_args(vm, argc, argv);
++#ifdef CONFIG_INTERPRETERS_BERRY_LVGL
++    be_lvgl_cleanup(vm);
++#endif
+     be_vm_delete(vm); /* free all objects and vm */
+     return res;
+ }
