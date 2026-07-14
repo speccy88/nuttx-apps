@@ -36,7 +36,11 @@ if(CONFIG_INTERPRETERS_BERRY)
         patch -l -p1 -d ${CMAKE_CURRENT_LIST_DIR}/berry -i
         ${CMAKE_CURRENT_LIST_DIR}/0001-Fix-Berry-default-port-for-NuttX.patch
         COMMAND patch -l -p1 -d ${CMAKE_CURRENT_LIST_DIR}/berry -i
-        ${CMAKE_CURRENT_LIST_DIR}/0002-Use-NuttX-console-reader.patch
+        ${CMAKE_CURRENT_LIST_DIR}/0002-Use-NuttX-console-reader.patch COMMAND
+        patch -l -p1 -d ${CMAKE_CURRENT_LIST_DIR}/berry -i
+        ${CMAKE_CURRENT_LIST_DIR}/0003-Honor-optional-builtin-class-dependencies.patch
+        COMMAND patch -l -p1 -d ${CMAKE_CURRENT_LIST_DIR}/berry -i
+        ${CMAKE_CURRENT_LIST_DIR}/0004-Keep-global-format-without-string-module.patch
       DOWNLOAD_NO_PROGRESS true
       TIMEOUT 30)
 
@@ -54,6 +58,10 @@ if(CONFIG_INTERPRETERS_BERRY)
 
   set(BERRY_CONFIG_DIR ${CMAKE_CURRENT_LIST_DIR}/include)
   set(BERRY_CONFIG ${BERRY_CONFIG_DIR}/berry_conf.h)
+  set(BERRY_COC_CONFIG ${BERRY_CONFIG})
+  if(CONFIG_ARCH_P2)
+    set(BERRY_COC_CONFIG ${BERRY_CONFIG_DIR}/berry_coc_p2.h)
+  endif()
   set(BERRY_GENERATE ${BERRY_DIR}/generate)
   set(BERRY_GEN_STAMP ${BERRY_GENERATE}/.generated)
   set(BERRY_FLAGS -Wno-unused-but-set-variable -Wno-shadow -DUSE_NUTTX_CONSOLE)
@@ -108,9 +116,9 @@ if(CONFIG_INTERPRETERS_BERRY)
     COMMAND ${CMAKE_COMMAND} -E make_directory ${BERRY_GENERATE}
     COMMAND
       ${Python3_EXECUTABLE} ${BERRY_DIR}/tools/coc/coc -o ${BERRY_GENERATE}
-      ${BERRY_DIR}/src ${BERRY_DIR}/default -c ${BERRY_CONFIG}
+      ${BERRY_DIR}/src ${BERRY_DIR}/default -c ${BERRY_COC_CONFIG}
     COMMAND ${CMAKE_COMMAND} -E touch ${BERRY_GEN_STAMP}
-    DEPENDS ${BERRY_CSRCS} ${BERRY_CONFIG}
+    DEPENDS ${BERRY_CSRCS} ${BERRY_CONFIG} ${BERRY_COC_CONFIG}
     WORKING_DIRECTORY ${BERRY_DIR}
     COMMENT "Generating Berry constant objects")
 

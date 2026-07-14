@@ -7,8 +7,9 @@ config INTERPRETERS_BERRY
 	tristate "Berry scripting language"
 	default n
 	depends on ARCH_SETJMP_H
-	depends on LIBC_FLOATINGPOINT
-	depends on SYSTEM_SYSTEM
+	depends on LIBC_FLOATINGPOINT || ARCH_P2
+	depends on !LIBM_NONE
+	depends on SYSTEM_SYSTEM || ARCH_P2
 	---help---
 		Enable the Berry embedded scripting language as an NSH built-in
 		command.  Berry provides a small ANSI C99 compiler, register-based
@@ -17,8 +18,11 @@ config INTERPRETERS_BERRY
 
 		The default NuttX configuration keeps Berry shared-library loading
 		disabled so boards do not need CONFIG_LIBC_DLFCN.  The math module
-		is enabled, so select a NuttX math library or provide one from the
-		toolchain.
+		is enabled on normal targets, so select a NuttX math library or provide
+		one from the toolchain.  The P2 size profile disables the optional math
+		module and uses single precision, but Berry's VM still needs fmodf().
+		P2 also disables Berry's OS module, so it does not require the
+		SYSTEM_SYSTEM implementation merely to provide system().
 
 if INTERPRETERS_BERRY
 

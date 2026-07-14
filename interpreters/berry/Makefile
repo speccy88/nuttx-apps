@@ -28,6 +28,10 @@ BERRY_ARCHIVE    = berry-$(BERRY_COMMIT_ID).zip
 BERRY_URL_BASE   = https://github.com/berry-lang/berry/archive/
 BERRY_URL        = $(BERRY_URL_BASE)/$(BERRY_COMMIT_ID).zip
 BERRY_CONFIG     = include$(DELIM)berry_conf.h
+BERRY_COC_CONFIG = $(BERRY_CONFIG)
+ifeq ($(CONFIG_ARCH_P2),y)
+BERRY_COC_CONFIG = include$(DELIM)berry_coc_p2.h
+endif
 BERRY_COC        = $(BERRY_UNPACK)$(DELIM)tools$(DELIM)coc$(DELIM)coc
 BERRY_GENERATE   = $(BERRY_UNPACK)$(DELIM)generate
 BERRY_GEN_STAMP  = $(BERRY_GENERATE)$(DELIM).generated
@@ -75,14 +79,16 @@ $(BERRY_UNPACK): $(BERRY_ARCHIVE)
 	$(Q) mv berry-$(BERRY_COMMIT_ID) $(BERRY_UNPACK)
 	$(Q) patch -l -d $(BERRY_UNPACK) -p1 < 0001-Fix-Berry-default-port-for-NuttX.patch
 	$(Q) patch -l -d $(BERRY_UNPACK) -p1 < 0002-Use-NuttX-console-reader.patch
+	$(Q) patch -l -d $(BERRY_UNPACK) -p1 < 0003-Honor-optional-builtin-class-dependencies.patch
+	$(Q) patch -l -d $(BERRY_UNPACK) -p1 < 0004-Keep-global-format-without-string-module.patch
 
-$(BERRY_GEN_STAMP): $(BERRY_UNPACK) $(BERRY_CONFIG)
+$(BERRY_GEN_STAMP): $(BERRY_UNPACK) $(BERRY_CONFIG) $(BERRY_COC_CONFIG)
 	$(Q) echo "Generating Berry constant objects"
 	$(Q) mkdir -p $(BERRY_GENERATE)
 	$(Q) python3 $(BERRY_COC) -o $(BERRY_GENERATE) \
 		$(BERRY_UNPACK)$(DELIM)src \
 		$(BERRY_UNPACK)$(DELIM)default \
-		-c $(BERRY_CONFIG)
+		-c $(BERRY_COC_CONFIG)
 	$(Q) touch $(BERRY_GEN_STAMP)
 
 ifeq ($(wildcard $(BERRY_UNPACK)/.git),)

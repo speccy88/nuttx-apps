@@ -1,0 +1,35 @@
+diff --git a/src/be_baselib.c b/src/be_baselib.c
+index 1cc1a64..8a86bd3 100644
+--- a/src/be_baselib.c
++++ b/src/be_baselib.c
+@@ -531,15 +531,15 @@ vartab m_builtin (scope: local) {
+     compile, func(be_baselib_compile)
+     issubclass, func(be_baselib_issubclass)
+     isinstance, func(be_baselib_isinstance)
+     __iterator__, func(be_baselib_iterator)
+-    open, func(be_nfunc_open)
++    open, func(be_nfunc_open), BE_USE_FILE_CLASS
+     list, class(be_class_list)
+     map, class(be_class_map)
+     range, class(be_class_range)
+-    bytes, class(be_class_bytes)
++    bytes, class(be_class_bytes), BE_USE_BYTES_CLASS
+     call, func(l_call)
+     bool, func(l_bool)
+     format, func(be_str_format)
+ }
+ @const_object_info_end */
+ #include "../generate/be_fixed_m_builtin.h"
+diff --git a/src/be_byteslib.c b/src/be_byteslib.c
+index db5271c..e1a5473 100644
+--- a/src/be_byteslib.c
++++ b/src/be_byteslib.c
+@@ -1711,7 +1711,7 @@ void be_load_byteslib(bvm *vm)
+ }
+ #else
+ /* @const_object_info_begin
+-class be_class_bytes (scope: global, name: bytes) {
++class be_class_bytes (scope: global, name: bytes, depend: BE_USE_BYTES_CLASS) {
+     .p, var
+     .size, var
+     .len, var

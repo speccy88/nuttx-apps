@@ -1,0 +1,10 @@
+diff --git a/src/be_strlib.c b/src/be_strlib.c
+index 374ed92..cce0f19 100644
+--- a/src/be_strlib.c
++++ b/src/be_strlib.c
+@@ -520,2 +519,0 @@
+-
+-#if BE_USE_STRING_MODULE
+@@ -686,0 +685,2 @@
++
++#if BE_USE_STRING_MODULE
