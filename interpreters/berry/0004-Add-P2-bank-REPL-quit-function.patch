@@ -1,0 +1,38 @@
+diff --git a/default/berry.c b/default/berry.c
+--- a/default/berry.c
++++ b/default/berry.c
+@@ -415,10 +415,34 @@ static void berry_preload_lvgl(bvm *vm)
+ }
+ #endif
+ 
++#ifdef CONFIG_SYSTEM_P2BERRYBANK
++static int berry_bank_quit(bvm *vm)
++{
++    int status = 0;
++
++    if (be_top(vm) > 0 && be_isint(vm, 1)) {
++        status = be_toindex(vm, 1);
++    }
++
++    be_exit(vm, status);
++    be_return_nil(vm);
++}
++
++static void berry_bank_register_quit(bvm *vm)
++{
++    be_pushntvfunction(vm, berry_bank_quit);
++    be_setglobal(vm, "quit");
++    be_pop(vm, 1);
++}
++#endif
++
+ int main(int argc, char *argv[])
+ {
+     int res;
+     bvm *vm = be_vm_new(); /* create a virtual machine instance */
++#ifdef CONFIG_SYSTEM_P2BERRYBANK
++    berry_bank_register_quit(vm);
++#endif
+ #ifdef CONFIG_INTERPRETERS_BERRY_LVGL_GLOBAL
+     berry_preload_lvgl(vm);
+ #endif

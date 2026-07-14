@@ -7,8 +7,9 @@ config INTERPRETERS_BERRY
 	tristate "Berry scripting language"
 	default n
 	depends on ARCH_SETJMP_H
-	depends on LIBC_FLOATINGPOINT
-	depends on SYSTEM_SYSTEM
+	depends on LIBC_FLOATINGPOINT || ARCH_P2
+	depends on !LIBM_NONE
+	depends on SYSTEM_SYSTEM || ARCH_P2
 	---help---
 		Enable the Berry embedded scripting language as an NSH built-in
 		command.  Berry provides a small ANSI C99 compiler, register-based
@@ -17,8 +18,11 @@ config INTERPRETERS_BERRY
 
 		The default NuttX configuration keeps Berry shared-library loading
 		disabled so boards do not need CONFIG_LIBC_DLFCN.  The math module
-		is enabled, so select a NuttX math library or provide one from the
-		toolchain.
+		is enabled on normal targets, so select a NuttX math library or provide
+		one from the toolchain.  The P2 size profile disables the optional math
+		module and uses single precision, but Berry's VM still needs fmodf().
+		P2 also disables Berry's OS module, so it does not require the
+		SYSTEM_SYSTEM implementation merely to provide system().
 
 if INTERPRETERS_BERRY
 
@@ -39,5 +43,86 @@ config INTERPRETERS_BERRY_STACKSIZE
 	default 12288
 	---help---
 		Size of the stack allocated for the Berry interpreter main task.
+
+config INTERPRETERS_BERRY_LVGL
+	bool "Berry LVGL bindings"
+	default n
+	depends on GRAPHICS_LVGL && LV_USE_NUTTX
+	select LV_USE_BAR
+	select LV_USE_BUTTON
+	select LV_USE_LABEL
+	select LV_USE_SLIDER
+	select LV_USE_SWITCH
+	---help---
+		Enable the native Berry module named lv.  It owns one LVGL NuttX
+		display at a time and exposes objects, labels and text, buttons, bars,
+		sliders, switches, styles, animation pumping, and event callbacks.
+
+config INTERPRETERS_BERRY_LVGL_GLOBAL
+	bool "Preload Berry LVGL module as global lv"
+	default y
+	depends on INTERPRETERS_BERRY_LVGL
+	---help---
+		Make lv available in the global namespace when Berry starts.  The
+		normal `import lv` form remains supported.
+
+config INTERPRETERS_BERRY_LVGL_DEVPATH
+	string "Berry LVGL display device path"
+	default "/dev/lcd0" if ARCH_P2
+	default "/dev/fb0"
+	depends on INTERPRETERS_BERRY_LVGL
+
+config INTERPRETERS_BERRY_LVGL_MOUSE
+	bool "Berry LVGL mouse input"
+	default y if INPUT_MOUSE
+	depends on INTERPRETERS_BERRY_LVGL && INPUT_MOUSE
+
+config INTERPRETERS_BERRY_LVGL_MOUSE_DEVPATH
+	string "Berry LVGL mouse device path"
+	default "/dev/mouse0"
+	depends on INTERPRETERS_BERRY_LVGL_MOUSE
+
+config INTERPRETERS_BERRY_LVGL_P2_TOUCH
+	bool "Berry LVGL P2 pressure-polled XPT2046 input"
+	default n
+	depends on INTERPRETERS_BERRY_LVGL && ARCH_P2
+	depends on P2_EC32MB_ILI9341_XPT2046
+	---help---
+		Use the P2 board's raw XPT2046 helper as an LVGL pointer input.  This
+		intentionally ignores PENIRQ and determines contact from Z1 pressure.
+
+if INTERPRETERS_BERRY_LVGL_P2_TOUCH
+
+config INTERPRETERS_BERRY_LVGL_P2_RAW_X_LEFT
+	int "Raw X at the left calibration target"
+	default 297
+	range 0 4095
+
+config INTERPRETERS_BERRY_LVGL_P2_RAW_X_RIGHT
+	int "Raw X at the right calibration target"
+	default 1764
+	range 0 4095
+
+config INTERPRETERS_BERRY_LVGL_P2_RAW_Y_TOP
+	int "Raw Y at the top calibration target"
+	default 216
+	range 0 4095
+
+config INTERPRETERS_BERRY_LVGL_P2_RAW_Y_BOTTOM
+	int "Raw Y at the bottom calibration target"
+	default 1812
+	range 0 4095
+
+config INTERPRETERS_BERRY_LVGL_P2_CAL_MARGIN
+	int "P2 touch calibration target margin in pixels"
+	default 24
+	range 1 80
+
+config INTERPRETERS_BERRY_LVGL_P2_PRESSURE_MIN
+	int "Minimum XPT2046 Z1 pressure"
+	default 64
+	range 1 4094
+
+endif # INTERPRETERS_BERRY_LVGL_P2_TOUCH
 
 endif # INTERPRETERS_BERRY

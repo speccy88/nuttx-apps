@@ -1,0 +1,58 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+menuconfig EXAMPLES_P2LVGL
+	tristate "Small Propeller 2 LVGL display/touch demo"
+	default n
+	depends on GRAPHICS_LVGL && LV_USE_NUTTX && LV_USE_NUTTX_LCD
+	depends on P2_EC32MB_ILI9341_XPT2046
+	---help---
+		Build a small LVGL screen for the P2 ILI9341/XPT2046 profile.  It
+		contains three small pages for redraw performance, common widgets, and
+		an on-screen keyboard; LVGL's large bundled demo suite is not required.
+		The demo polls XPT2046 Z1 pressure directly because some modules do not
+		assert their PEN output reliably.
+
+if EXAMPLES_P2LVGL
+
+config EXAMPLES_P2LVGL_PRIORITY
+	int "p2lvgl task priority"
+	default 100
+
+config EXAMPLES_P2LVGL_STACKSIZE
+	int "p2lvgl stack size"
+	default 12288
+
+config EXAMPLES_P2LVGL_RAW_X_LEFT
+	int "Raw X at the left calibration target"
+	default 297
+	range 0 4095
+
+config EXAMPLES_P2LVGL_RAW_X_RIGHT
+	int "Raw X at the right calibration target"
+	default 1764
+	range 0 4095
+
+config EXAMPLES_P2LVGL_RAW_Y_TOP
+	int "Raw Y at the top calibration target"
+	default 216
+	range 0 4095
+
+config EXAMPLES_P2LVGL_RAW_Y_BOTTOM
+	int "Raw Y at the bottom calibration target"
+	default 1812
+	range 0 4095
+
+config EXAMPLES_P2LVGL_CAL_MARGIN
+	int "Calibration target margin in pixels"
+	default 24
+	range 1 80
+
+config EXAMPLES_P2LVGL_PRESSURE_MIN
+	int "Minimum XPT2046 Z1 pressure"
+	default 100
+	range 1 4094
+
+endif

@@ -1,0 +1,22 @@
+diff --git a/src/be_strlib.c b/src/be_strlib.c
+index 374ed92..cce0f19 100644
+--- a/src/be_strlib.c
++++ b/src/be_strlib.c
+@@ -518,8 +518,6 @@ BERRY_API const char* be_toescape(bvm *vm, int index, int mode)
+     return be_tostring(vm, index);
+ }
+ 
+-#if BE_USE_STRING_MODULE
+-
+ #define MAX_FORMAT_MODE     32
+ #define FLAGES              "+- #0"
+ 
+@@ -685,6 +683,8 @@ int be_str_format(bvm *vm)
+     be_return_nil(vm);
+ }
+ 
++#if BE_USE_STRING_MODULE
++
+ /* string.op(s1, s2, begin=0, end=length(s2)) */
+ static bint str_operation(bvm *vm, str_opfunc func, bint error)
+ {

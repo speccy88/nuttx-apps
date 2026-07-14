@@ -1,0 +1,37 @@
+--- a/src/drivers/nuttx/lv_nuttx_entry.c
++++ b/src/drivers/nuttx/lv_nuttx_entry.c
+@@ -41,7 +41,9 @@ static uint32_t millis(void);
+ #if LV_USE_LOG
+     static void syslog_print(lv_log_level_t level, const char * buf);
+ #endif
++#ifndef CONFIG_DISABLE_PTHREAD
+ static void check_stack_size(void);
++#endif
+ 
+ #ifdef CONFIG_LV_USE_NUTTX_LIBUV
+     static void lv_nuttx_uv_loop(lv_nuttx_result_t * result);
+@@ -105,7 +107,9 @@ void lv_nuttx_init(const lv_nuttx_dsc_t * dsc, lv_nuttx_result_t * result)
+ #endif
+     lv_tick_set_cb(millis);
+ 
++#ifndef CONFIG_DISABLE_PTHREAD
+     check_stack_size();
++#endif
+ 
+     lv_nuttx_cache_init();
+ 
+@@ -300,6 +304,7 @@ static void lv_nuttx_uv_loop(lv_nuttx_result_t * result)
+ }
+ #endif
+ 
++#ifndef CONFIG_DISABLE_PTHREAD
+ static void check_stack_size(void)
+ {
+     pthread_t tid = pthread_self();
+@@ -312,5 +317,6 @@ static void check_stack_size(void)
+                      LV_NUTTX_MIN_STACK_SIZE);
+     }
+ }
++#endif
+ 
+ #endif /*LV_USE_NUTTX*/

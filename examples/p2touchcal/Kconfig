@@ -1,0 +1,33 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+menuconfig EXAMPLES_P2TOUCHCAL
+	tristate "Propeller 2 framebuffer touch calibration"
+	default n
+	depends on VIDEO_FB && FB_UPDATE && INPUT_TOUCHSCREEN
+	---help---
+		Build a four-corner framebuffer calibration utility for the
+		ILI9341/XPT2046 P2 profile.  It averages at least three raw samples
+		per target and prints the orientation-preserving calibration result.
+
+if EXAMPLES_P2TOUCHCAL
+
+config EXAMPLES_P2TOUCHCAL_PRIORITY
+	int "p2touchcal task priority"
+	default 100
+
+config EXAMPLES_P2TOUCHCAL_STACKSIZE
+	int "p2touchcal stack size"
+	default 4096
+
+config EXAMPLES_P2TOUCHCAL_FB_DEVPATH
+	string "Framebuffer device path"
+	default "/dev/fb0"
+
+config EXAMPLES_P2TOUCHCAL_INPUT_DEVPATH
+	string "Raw touchscreen device path"
+	default "/dev/input0"
+
+endif
