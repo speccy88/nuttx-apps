@@ -9,7 +9,7 @@ config TESTING_P2STORAGE
 	depends on ARCH_P2 && BUILD_FLAT
 	depends on P2_EC32MB_STORAGE_BINDINGS
 	depends on MTD_SMART && FS_SMARTFS
-	depends on MMCSD_SPI && FS_FAT
+	depends on (MMCSD_SPI || MMCSD_SDIO) && FS_FAT
 	depends on BCH && !DISABLE_PSEUDOFS_OPERATIONS
 	depends on !DISABLE_MOUNTPOINT
 	---help---
@@ -62,6 +62,39 @@ config TESTING_P2STORAGE_STREAM_SIZE
 		The persistent flash and SD files are streamed through a 4 KiB Hub
 		buffer.  One MiB is larger than the P2's entire 512 KiB Hub RAM, so a
 		passing write/read CRC cannot have come from a whole-file RAM buffer.
+
+config TESTING_P2STORAGE_SD_BENCHMARK
+	bool "Enable the read-only raw microSD benchmark command"
+	default n
+	---help---
+		Enable sd-benchmark-read.  The command opens the configured raw block
+		device read-only and accumulates time spent inside each read call.  It
+		hashes the exact returned bytes immediately after each call, outside the
+		timed interval.  It never mounts, formats, or writes the card.  The strict
+		protocol requires an odd pass count of 3 through 31 and at least 16 MiB
+		per pass.
+
+if TESTING_P2STORAGE_SD_BENCHMARK
+
+config TESTING_P2STORAGE_BENCHMARK_BUFFER_SIZE
+	int "Raw microSD benchmark buffer size"
+	default 32768
+	range 4096 65536
+	---help---
+		Heap buffer used for each raw block read.  The implementation requires
+		a multiple of 512 bytes.  32 KiB keeps Hub-RAM use bounded while still
+		requesting 64 MMC/SD sectors per read call.
+
+config TESTING_P2STORAGE_BENCHMARK_DRIVER
+	string "Driver label emitted by the benchmark"
+	default "P2-SDIO-STREAMER" if P2_EC32MB_SDIO_NATIVE
+	default "P2-SPI-SMARTPIN"
+	---help---
+		Uppercase evidence label for the active P2 lower-half implementation.
+		Use only A-Z, 0-9, underscore, and hyphen so the strict host parser can
+		bind the result to this identity.
+
+endif # TESTING_P2STORAGE_SD_BENCHMARK
 
 config TESTING_P2STORAGE_DESTRUCTIVE
 	bool "Enable explicitly authenticated destructive storage commands"

@@ -42,6 +42,13 @@
 #include <unistd.h>
 
 #include <nuttx/fs/ioctl.h>
+#include <nuttx/version.h>
+
+#if defined(CONFIG_TESTING_P2STORAGE_SD_BENCHMARK) && \
+    ((defined(CONFIG_MMCSD_SPI) && defined(CONFIG_P2_STORAGE)) || \
+     defined(CONFIG_P2_EC32MB_SDIO_NATIVE))
+#  include <arch/board/board.h>
+#endif
 
 #ifdef CONFIG_TESTING_P2STORAGE_DESTRUCTIVE
 #  include <nuttx/fs/fs.h>
@@ -79,6 +86,16 @@
 #define P2STORAGE_FAT32_EOC_MIN         UINT32_C(0x0ffffff8)
 #define P2STORAGE_FAT32_ENTRY_MASK      UINT32_C(0x0fffffff)
 
+#ifdef CONFIG_TESTING_P2STORAGE_SD_BENCHMARK
+#  define P2STORAGE_BENCHMARK_BUFFER_SIZE \
+     CONFIG_TESTING_P2STORAGE_BENCHMARK_BUFFER_SIZE
+#  define P2STORAGE_BENCHMARK_MIN_BYTES   UINT64_C(16777216)
+#  define P2STORAGE_BENCHMARK_MAX_BYTES   UINT64_C(1073741824)
+#  define P2STORAGE_BENCHMARK_MIN_PASSES  3
+#  define P2STORAGE_BENCHMARK_MAX_PASSES  31
+#  define P2STORAGE_BENCHMARK_THRESHOLD_BPS UINT64_C(41000000)
+#endif
+
 #ifdef CONFIG_TESTING_P2STORAGE_DESTRUCTIVE
 #  define P2STORAGE_SD_PARTITION_DEVPATH "/dev/p2sd1"
 #  define P2STORAGE_SD_PARTITION_START   UINT32_C(2048)
@@ -97,6 +114,14 @@
 
 #if CONFIG_TESTING_P2STORAGE_STREAM_SIZE != 1048576
 #  error "The strict P2 storage protocol requires a one-MiB stream"
+#endif
+
+#ifdef CONFIG_TESTING_P2STORAGE_SD_BENCHMARK
+#  if CONFIG_TESTING_P2STORAGE_BENCHMARK_BUFFER_SIZE < 4096 || \
+      CONFIG_TESTING_P2STORAGE_BENCHMARK_BUFFER_SIZE > 65536 || \
+      (CONFIG_TESTING_P2STORAGE_BENCHMARK_BUFFER_SIZE % 512) != 0
+#    error "The P2 SD benchmark buffer must be 4-64 KiB and sector aligned"
+#  endif
 #endif
 
 /****************************************************************************
@@ -308,6 +333,615 @@ static int p2storage_parse_sequence(FAR const char *text,
   *sequence = value;
   return 0;
 }
+
+#ifdef CONFIG_TESTING_P2STORAGE_SD_BENCHMARK
+static int p2storage_parse_decimal(FAR const char *text, uint64_t limit,
+                                   FAR uint64_t *value)
+{
+  uint64_t parsed = 0;
+  size_t i;
+
+  if (text == NULL || text[0] == '\0')
+    {
+      return -EINVAL;
+    }
+
+  for (i = 0; text[i] != '\0'; i++)
+    {
+      uint64_t digit;
+
+      if (text[i] < '0' || text[i] > '9')
+        {
+          return -EINVAL;
+        }
+
+      digit = (uint64_t)(text[i] - '0');
+      if (parsed > (limit - digit) / UINT64_C(10))
+        {
+          return -ERANGE;
+        }
+
+      parsed = parsed * UINT64_C(10) + digit;
+    }
+
+  *value = parsed;
+  return 0;
+}
+
+static int p2storage_benchmark_geometry(int fd,
+                                        FAR struct geometry *geometry)
+{
+  memset(geometry, 0, sizeof(*geometry));
+  if (ioctl(fd, BIOC_GEOMETRY,
+            (unsigned long)((uintptr_t)geometry)) < 0)
+    {
+      return p2storage_errno();
+    }
+
+  if (!geometry->geo_available || geometry->geo_nsectors <= 0 ||
+      geometry->geo_sectorsize != P2STORAGE_SD_SECTOR_SIZE)
+    {
+      return -ENODEV;
+    }
+
+  return 0;
+}
+
+static bool p2storage_benchmark_geometry_equal(
+  FAR const struct geometry *before, FAR const struct geometry *after)
+{
+  return before->geo_available == after->geo_available &&
+         before->geo_mediachanged == after->geo_mediachanged &&
+         before->geo_nsectors == after->geo_nsectors &&
+         before->geo_sectorsize == after->geo_sectorsize;
+}
+
+static int p2storage_benchmark_seek_start(int fd)
+{
+  off_t position = lseek(fd, 0, SEEK_SET);
+
+  if (position < 0)
+    {
+      return p2storage_errno();
+    }
+
+  return position == 0 ? 0 : -EIO;
+}
+
+static uint32_t p2storage_benchmark_counter(void)
+{
+  uint32_t value;
+
+  __asm__ __volatile__("getct %0" : "=r" (value) : : "memory");
+  return value;
+}
+
+static int p2storage_benchmark_print_config(void)
+{
+  FAR const char *bus;
+  FAR const char *rx_mode;
+  FAR const char *payload_crc16;
+  FAR const char *command_crc7;
+  uint64_t raw_ceiling_bps;
+  uint32_t requested_clock_hz;
+  uint32_t bus_clock_hz;
+  uint32_t active_divisor;
+  unsigned int bus_width;
+  unsigned int high_speed;
+  unsigned int overclocked;
+  unsigned int phase_calibrated;
+  unsigned int rx_lag;
+  unsigned int hil_required;
+
+#ifdef CONFIG_P2_EC32MB_SDIO_NATIVE
+  struct p2_sdio_native_info_s info;
+  int ret = p2_sdio_native_get_info(&info);
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  bus = "SDIO4";
+  bus_width = info.wide_bus ? 4 : 1;
+  requested_clock_hz = info.requested_data_clock_hz;
+  bus_clock_hz = info.data_clock_hz;
+  active_divisor = info.active_divisor;
+  raw_ceiling_bps = info.raw_bus_bytes_per_second;
+  high_speed = info.high_speed;
+  overclocked = info.overclocked;
+  phase_calibrated = info.phase_calibrated;
+  rx_mode = info.input_synchronized ? "SYNC" : "ASYNC";
+  rx_lag = info.rx_lag;
+  payload_crc16 = info.fast_crc16_verified ? "CHECKED" : "UNCHECKED";
+  command_crc7 = info.command_crc7_verified ? "CHECKED" : "UNCHECKED";
+  hil_required = info.hil_required;
+#else
+  uint32_t period;
+
+  bus = "SPI1";
+  bus_width = 1;
+  requested_clock_hz = CONFIG_MMCSD_SPICLOCK;
+#  ifdef CONFIG_P2_STORAGE_SMARTPIN_SPI
+  period = (CONFIG_P2_SYSCLK_HZ + requested_clock_hz - 1u) /
+           requested_clock_hz;
+  if (period < 4u)
+    {
+      period = 4u;
+    }
+#  else
+  period = (CONFIG_P2_SYSCLK_HZ + requested_clock_hz * 2u - 1u) /
+           (requested_clock_hz * 2u);
+  if (period < 4u)
+    {
+      period = 4u;
+    }
+
+  period *= 2u;
+#  endif
+  active_divisor = period;
+  bus_clock_hz = CONFIG_P2_SYSCLK_HZ / active_divisor;
+  raw_ceiling_bps = bus_clock_hz / 8u;
+  high_speed = 0;
+  overclocked = bus_clock_hz > UINT32_C(25000000);
+  phase_calibrated = 0;
+  rx_mode = "NA";
+  rx_lag = 0;
+  payload_crc16 = "UNCHECKED";
+  command_crc7 = "INIT_ONLY";
+  hil_required = overclocked;
+#endif
+
+  if (bus_clock_hz == 0 || active_divisor == 0 ||
+      raw_ceiling_bps != (uint64_t)bus_clock_hz * bus_width / 8u)
+    {
+      return -EIO;
+    }
+
+  printf("P2SDBENCH:CONFIG:SYSCLK_HZ=%lu:BUS=%s:BUS_WIDTH_BITS=%u:"
+         "REQUESTED_BUS_CLOCK_HZ=%lu:BUS_CLOCK_HZ=%lu:"
+         "ACTIVE_DIVISOR=%lu:RAW_CEILING_BPS=%" PRIu64
+         ":HIGH_SPEED=%u:OVERCLOCKED=%u:PHASE_CALIBRATED=%u:"
+         "RX_MODE=%s:RX_LAG=%u:PAYLOAD_CRC16=%s:CMD_CRC7=%s:"
+         "HIL_REQUIRED=%u:BUFFER_BYTES=%u:DRIVER=%s:BUILD=%s\n",
+         (unsigned long)CONFIG_P2_SYSCLK_HZ, bus, bus_width,
+         (unsigned long)requested_clock_hz, (unsigned long)bus_clock_hz,
+         (unsigned long)active_divisor, raw_ceiling_bps, high_speed,
+         overclocked, phase_calibrated, rx_mode, rx_lag, payload_crc16,
+         command_crc7, hil_required,
+         (unsigned int)P2STORAGE_BENCHMARK_BUFFER_SIZE,
+         CONFIG_TESTING_P2STORAGE_BENCHMARK_DRIVER,
+         CONFIG_VERSION_BUILD);
+  return 0;
+}
+
+static int p2storage_benchmark_read_range(int fd, FAR uint8_t *buffer,
+                                          size_t buffer_size,
+                                          uint64_t byte_count,
+                                          FAR uint64_t *read_cycles,
+                                          FAR uint32_t *hash)
+{
+  uint64_t remaining = byte_count;
+  uint64_t total_cycles = 0;
+  uint32_t value = UINT32_C(2166136261);
+
+  while (remaining > 0)
+    {
+      size_t request = remaining < buffer_size ?
+                       (size_t)remaining : buffer_size;
+      ssize_t nread;
+
+      do
+        {
+          uint32_t started;
+          uint32_t ended;
+          uint32_t call_cycles;
+          int lower_error;
+
+          started = p2storage_benchmark_counter();
+          nread = read(fd, buffer, request);
+          ended = p2storage_benchmark_counter();
+
+          /* Each bounded read is far shorter than one 32-bit GETCT wrap.
+           * Unsigned subtraction therefore gives its exact cycle count even
+           * when the counter wraps once between the two samples.
+           */
+
+          call_cycles = ended - started;
+          if (call_cycles > UINT64_MAX - total_cycles)
+            {
+              return -EOVERFLOW;
+            }
+
+          total_cycles += call_cycles;
+#if defined(CONFIG_MMCSD_SPI) && defined(CONFIG_P2_STORAGE)
+          lower_error = p2_sdspi_get_last_error();
+#else
+          lower_error = 0;
+#endif
+          if (lower_error < 0)
+            {
+              return lower_error;
+            }
+        }
+      while (nread < 0 && errno == EINTR);
+
+      if (nread < 0)
+        {
+          return p2storage_errno();
+        }
+
+      if ((size_t)nread != request)
+        {
+          return -EIO;
+        }
+
+      if (hash != NULL)
+        {
+          value = p2storage_fnv1a_part(buffer, request, value);
+        }
+
+      remaining -= request;
+    }
+
+  if (read_cycles != NULL)
+    {
+      *read_cycles = total_cycles;
+    }
+
+  if (hash != NULL)
+    {
+      *hash = value;
+    }
+
+  return 0;
+}
+
+static int p2storage_benchmark_cycles_to_usec(uint64_t cycles,
+                                              FAR uint64_t *usec)
+{
+  uint64_t seconds;
+  uint64_t remainder;
+  uint64_t fractional;
+
+  if (cycles == 0 || CONFIG_P2_SYSCLK_HZ == 0)
+    {
+      return -ERANGE;
+    }
+
+  seconds = cycles / CONFIG_P2_SYSCLK_HZ;
+  remainder = cycles % CONFIG_P2_SYSCLK_HZ;
+  if (seconds > UINT64_MAX / UINT64_C(1000000))
+    {
+      return -EOVERFLOW;
+    }
+
+  fractional = (remainder * UINT64_C(1000000) +
+                CONFIG_P2_SYSCLK_HZ - 1u) / CONFIG_P2_SYSCLK_HZ;
+  *usec = seconds * UINT64_C(1000000) + fractional;
+  return *usec > 0 ? 0 : -ERANGE;
+}
+
+static void p2storage_benchmark_sort_rates(FAR uint64_t *rates,
+                                           unsigned int count)
+{
+  unsigned int i;
+
+  for (i = 1; i < count; i++)
+    {
+      uint64_t value = rates[i];
+      unsigned int position = i;
+
+      while (position > 0 && rates[position - 1] > value)
+        {
+          rates[position] = rates[position - 1];
+          position--;
+        }
+
+      rates[position] = value;
+    }
+}
+
+static int p2storage_sd_benchmark_read(uint32_t sequence,
+                                       uint64_t byte_count,
+                                       unsigned int passes)
+{
+  struct geometry primed;
+  struct geometry before;
+  struct geometry after;
+  FAR uint8_t *buffer = NULL;
+  uint64_t rates[P2STORAGE_BENCHMARK_MAX_PASSES];
+  uint64_t capacity;
+  uint32_t baseline_hash = 0;
+  FAR const char *fail_stage = "SETUP";
+#ifdef CONFIG_P2_EC32MB_SDIO_NATIVE
+  struct p2_sdio_native_info_s native_info;
+  bool timed_fast_crc16 = false;
+  bool crc_policy_armed = false;
+#endif
+  unsigned int pass;
+  int fd = -1;
+  int ret;
+
+  printf("P2SDBENCH:BEGIN:VERSION=2:MODE=RAW:OP=READ:SEQ=%08" PRIX32
+         ":DEV=%s:BYTES=%" PRIu64 ":PASSES=%u:THRESHOLD_BPS=%" PRIu64
+         "\n",
+         sequence, g_sd.devpath, byte_count, passes,
+         P2STORAGE_BENCHMARK_THRESHOLD_BPS);
+  fd = open(g_sd.devpath, O_RDONLY);
+  if (fd < 0)
+    {
+      ret = p2storage_errno();
+      goto out;
+    }
+
+  fail_stage = "CONFIG";
+  ret = p2storage_benchmark_print_config();
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  /* BIOC_GEOMETRY consumes the driver's media-changed indication.  Prime it
+   * once, then require an unchanged, clear indication immediately before and
+   * after the measured campaign.
+   */
+
+  fail_stage = "GEOMETRY";
+  ret = p2storage_benchmark_geometry(fd, &primed);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  ret = p2storage_benchmark_geometry(fd, &before);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  if (before.geo_mediachanged)
+    {
+      ret = -EAGAIN;
+      goto out;
+    }
+
+  if ((uint64_t)before.geo_nsectors >
+      UINT64_MAX / (uint64_t)before.geo_sectorsize)
+    {
+      ret = -EOVERFLOW;
+      goto out;
+    }
+
+  capacity = (uint64_t)before.geo_nsectors *
+             (uint64_t)before.geo_sectorsize;
+  if (byte_count > capacity)
+    {
+      ret = -EFBIG;
+      goto out;
+    }
+
+  printf("P2SDBENCH:GEOMETRY:PHASE=BEFORE:SECTORS=%" PRIuMAX
+         ":SECTOR_SIZE=%" PRIuMAX ":MEDIA_CHANGED=0\n",
+         (uintmax_t)before.geo_nsectors,
+         (uintmax_t)before.geo_sectorsize);
+
+  fail_stage = "ALLOC";
+  buffer = malloc(P2STORAGE_BENCHMARK_BUFFER_SIZE);
+  if (buffer == NULL)
+    {
+      ret = -ENOMEM;
+      goto out;
+    }
+
+  /* Establish one full-range reference hash through four-lane CRC16-checked
+   * transfers before the timed campaign.  Record mode may then restore its
+   * explicitly reported CRC-off fast policy; every timed byte still has to
+   * reproduce the conservative reference exactly.
+   */
+
+#ifdef CONFIG_P2_EC32MB_SDIO_NATIVE
+  fail_stage = "BASELINE-POLICY";
+  ret = p2_sdio_native_get_info(&native_info);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  timed_fast_crc16 = native_info.fast_crc16_verified;
+  ret = p2_sdio_native_set_fast_crc16(true);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  crc_policy_armed = true;
+  ret = p2_sdio_native_get_info(&native_info);
+  if (ret < 0 || !native_info.fast_crc16_verified)
+    {
+      ret = ret < 0 ? ret : -EIO;
+      goto out;
+    }
+#endif
+
+  fail_stage = "BASELINE-SEEK";
+  ret = p2storage_benchmark_seek_start(fd);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  fail_stage = "BASELINE-READ";
+  ret = p2storage_benchmark_read_range(
+    fd, buffer, P2STORAGE_BENCHMARK_BUFFER_SIZE, byte_count, NULL,
+    &baseline_hash);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+#ifdef CONFIG_P2_EC32MB_SDIO_NATIVE
+  fail_stage = "BASELINE-POLICY";
+  ret = p2_sdio_native_set_fast_crc16(timed_fast_crc16);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  ret = p2_sdio_native_get_info(&native_info);
+  if (ret < 0 ||
+      native_info.fast_crc16_verified != timed_fast_crc16)
+    {
+      ret = ret < 0 ? ret : -EIO;
+      goto out;
+    }
+
+  crc_policy_armed = false;
+  printf("P2SDBENCH:BASELINE:MODE=RAW:OP=READ:VERIFY=CRC16:");
+#else
+  printf("P2SDBENCH:BASELINE:MODE=RAW:OP=READ:VERIFY=UNCHECKED:");
+#endif
+  printf("BYTES=%" PRIu64 ":FNV1A=%08" PRIX32 ":SEQ=%08" PRIX32
+         "\n", byte_count, baseline_hash, sequence);
+
+  printf("P2SDBENCH:TIMER:SOURCE=P2_GETCT:FREQUENCY_HZ=%lu:"
+         "RESOLUTION_CYCLES=1:SCOPE=READ_CALLS:"
+         "VERIFY=HASH_TIMED_BYTES\n",
+         (unsigned long)CONFIG_P2_SYSCLK_HZ);
+
+  for (pass = 0; pass < passes; pass++)
+    {
+      uint64_t elapsed_cycles;
+      uint64_t elapsed_usec;
+      uint64_t rate;
+      uint32_t hash;
+
+      fail_stage = "SEEK";
+      ret = p2storage_benchmark_seek_start(fd);
+      if (ret < 0)
+        {
+          goto out;
+        }
+
+      /* Accumulate only time spent in read() calls.  Hash each returned
+       * buffer after its call's interval has ended, coupling integrity to
+       * the measured bytes without charging the software FNV loop to the
+       * storage driver.
+       */
+
+      fail_stage = "READ";
+      ret = p2storage_benchmark_read_range(
+        fd, buffer, P2STORAGE_BENCHMARK_BUFFER_SIZE, byte_count,
+        &elapsed_cycles, &hash);
+      if (ret < 0)
+        {
+          goto out;
+        }
+
+      ret = p2storage_benchmark_cycles_to_usec(elapsed_cycles,
+                                               &elapsed_usec);
+      if (ret < 0 ||
+          byte_count > UINT64_MAX / CONFIG_P2_SYSCLK_HZ)
+        {
+          ret = -ERANGE;
+          goto out;
+        }
+
+      rate = byte_count * CONFIG_P2_SYSCLK_HZ / elapsed_cycles;
+      if (rate == 0)
+        {
+          ret = -ERANGE;
+          goto out;
+        }
+
+      printf("P2SDBENCH:RESULT:MODE=RAW:OP=READ:PASS=%u:BYTES=%" PRIu64
+             ":CYCLES=%" PRIu64 ":USEC=%" PRIu64 ":BPS=%" PRIu64
+             ":FNV1A=%08" PRIX32 ":SEQ=%08" PRIX32 "\n",
+             pass + 1, byte_count, elapsed_cycles, elapsed_usec, rate,
+             hash, sequence);
+
+      if (hash != baseline_hash)
+        {
+          fail_stage = "INTEGRITY";
+          ret = -EIO;
+          goto out;
+        }
+
+      rates[pass] = rate;
+    }
+
+  fail_stage = "GEOMETRY";
+  ret = p2storage_benchmark_geometry(fd, &after);
+  if (ret < 0)
+    {
+      goto out;
+    }
+
+  printf("P2SDBENCH:GEOMETRY:PHASE=AFTER:SECTORS=%" PRIuMAX
+         ":SECTOR_SIZE=%" PRIuMAX ":MEDIA_CHANGED=%u\n",
+         (uintmax_t)after.geo_nsectors, (uintmax_t)after.geo_sectorsize,
+         after.geo_mediachanged ? 1 : 0);
+
+  if (after.geo_mediachanged ||
+      !p2storage_benchmark_geometry_equal(&before, &after))
+    {
+      ret = -EAGAIN;
+      goto out;
+    }
+
+  if (close(fd) < 0)
+    {
+      fd = -1;
+      fail_stage = "CLOSE";
+      ret = p2storage_errno();
+      goto out;
+    }
+
+  fd = -1;
+  p2storage_benchmark_sort_rates(rates, passes);
+  if (rates[0] <= P2STORAGE_BENCHMARK_THRESHOLD_BPS)
+    {
+      fail_stage = "THRESHOLD";
+      ret = -ERANGE;
+      goto out;
+    }
+
+  printf("P2SDBENCH:PASS:MODE=RAW:OP=READ:SEQ=%08" PRIX32
+         ":PASSES=%u:BYTES=%" PRIu64 ":MIN_BPS=%" PRIu64
+         ":MEDIAN_BPS=%" PRIu64 ":MAX_BPS=%" PRIu64
+         ":THRESHOLD_BPS=%" PRIu64 "\n",
+         sequence, passes, byte_count, rates[0], rates[passes / 2],
+         rates[passes - 1], P2STORAGE_BENCHMARK_THRESHOLD_BPS);
+  printf("P2SDBENCH:DONE:SEQ=%08" PRIX32 "\n", sequence);
+  fflush(stdout);
+  free(buffer);
+  return 0;
+
+out:
+#ifdef CONFIG_P2_EC32MB_SDIO_NATIVE
+  if (crc_policy_armed)
+    {
+      p2_sdio_native_set_fast_crc16(timed_fast_crc16);
+    }
+#endif
+
+  if (fd >= 0)
+    {
+      close(fd);
+    }
+
+  free(buffer);
+  if (ret >= 0)
+    {
+      ret = -EIO;
+    }
+
+  printf("P2SDBENCH:FAIL:STAGE=%s:CODE=%d\n", fail_stage, ret);
+  printf("P2SDBENCH:DONE:SEQ=%08" PRIX32 "\n", sequence);
+  fflush(stdout);
+  return ret;
+}
+#endif /* CONFIG_TESTING_P2STORAGE_SD_BENCHMARK */
 
 static int p2storage_make_path(FAR char *path, size_t path_size,
                                FAR const struct p2storage_medium_s *medium,
@@ -2596,6 +3230,8 @@ static void p2storage_usage(FAR const char *progname)
   printf("       %s flash-verify 8HEX\n", progname);
   printf("       %s sd-verify 8HEX\n", progname);
   printf("       %s sd-rom-verify\n", progname);
+  printf("       %s sd-benchmark-read 8HEX BYTES ODD-PASSES\n",
+         progname);
 #ifdef CONFIG_TESTING_P2STORAGE_DESTRUCTIVE
   printf("       %s flash-format %s\n", progname,
          P2STORAGE_DESTRUCTIVE_MAGIC);
@@ -2680,6 +3316,38 @@ int main(int argc, FAR char *argv[])
 
       terminal = "SD-ROM-VERIFY";
       ret = p2storage_sd_rom_verify();
+    }
+  else if (strcmp(argv[1], "sd-benchmark-read") == 0)
+    {
+#ifdef CONFIG_TESTING_P2STORAGE_SD_BENCHMARK
+      uint64_t byte_count;
+      uint64_t pass_count;
+#endif
+
+      terminal = "SD-BENCHMARK-READ";
+#ifdef CONFIG_TESTING_P2STORAGE_SD_BENCHMARK
+
+      if (argc != 5 ||
+          p2storage_parse_sequence(argv[2], &sequence) < 0 ||
+          p2storage_parse_decimal(argv[3],
+                                  P2STORAGE_BENCHMARK_MAX_BYTES,
+                                  &byte_count) < 0 ||
+          p2storage_parse_decimal(argv[4],
+                                  P2STORAGE_BENCHMARK_MAX_PASSES,
+                                  &pass_count) < 0 ||
+          byte_count < P2STORAGE_BENCHMARK_MIN_BYTES ||
+          (byte_count % P2STORAGE_SD_SECTOR_SIZE) != 0 ||
+          pass_count < P2STORAGE_BENCHMARK_MIN_PASSES ||
+          (pass_count & UINT64_C(1)) == 0)
+        {
+          return p2storage_fail("BENCHMARK-ARGS", -EINVAL);
+        }
+
+      ret = p2storage_sd_benchmark_read(sequence, byte_count,
+                                        (unsigned int)pass_count);
+#else
+      ret = -ENOSYS;
+#endif
     }
   else if (strcmp(argv[1], "flash-verify") == 0 ||
            strcmp(argv[1], "sd-verify") == 0 ||
