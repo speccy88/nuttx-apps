@@ -6,6 +6,7 @@
 config INTERPRETERS_CPYTHON
 	tristate "CPython"
 	depends on LIB_ZLIB
+	depends on !DISABLE_PTHREAD
 	depends on !LIBC_DLFCN || LIB_LIBFFI
 	depends on EXPERIMENTAL
 	default n
@@ -24,7 +25,19 @@ config INTERPRETERS_CPYTHON_STACKSIZE
 	int "CPython stack size"
 	default 307200
 	---help---
-		This is the stack size allocated when the CPython task runs.
+		This is the stack size allocated for the CPython worker thread.  The
+		command launcher has a separate, smaller stack so it can reject a
+		concurrent interpreter before allocating this stack.
+
+config INTERPRETERS_CPYTHON_LAUNCHER_STACKSIZE
+	int "CPython command launcher stack size"
+	default 2048
+	range 1024 16384
+	---help---
+		This is the stack size allocated for the CPython command entry point.
+		It only guards the process-global runtime, creates one worker, and
+		waits for it.  The interpreter itself uses
+		INTERPRETERS_CPYTHON_STACKSIZE.
 
 config INTERPRETERS_CPYTHON_PRIORITY
 	int "CPython task priority"
@@ -61,5 +74,16 @@ config INTERPRETERS_CPYTHON_PYTHONPATH
 	---help---
 		This is the Python default search path for modules files. This is
 		required to be a writable path.
+
+config INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
+	bool "Provide the CPython ROMFS from board-managed memory"
+	default n
+	---help---
+		Do not compile the standard-library ROMFS into the application archive.
+		The board must validate and publish an immutable image through
+		board_cpython_runtime_prepare() and board_cpython_romfs_image().  This is
+		intended for targets such as Propeller 2 where the module image lives in
+		external unified memory.  The build still emits
+		romfs_cpython_modules.img as a separately packaged artifact.
 
 endif

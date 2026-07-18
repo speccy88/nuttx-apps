@@ -1,0 +1,278 @@
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -480,21 +480,28 @@
+ 
+ #ifdef WITH_THREAD
+ #  ifdef Py_BUILD_CORE
+-#    ifdef HAVE_THREAD_LOCAL
+-#      error "HAVE_THREAD_LOCAL is already defined"
+-#    endif
+-#    define HAVE_THREAD_LOCAL 1
+-#    ifdef thread_local
+-#      define _Py_thread_local thread_local
+-#    elif __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_THREADS__)
+-#      define _Py_thread_local _Thread_local
+-#    elif defined(_MSC_VER)  /* AKA NT_THREADS */
+-#      define _Py_thread_local __declspec(thread)
+-#    elif defined(__GNUC__)  /* includes clang */
+-#      define _Py_thread_local __thread
++#    if defined(__propeller2__)
++       /* P2LLVM accepts the Clang TLS spelling but cannot lower native TLS.
++        * Use the runtime's dedicated Py_tss_t key instead. */
++#      undef HAVE_THREAD_LOCAL
++#      define _Py_USE_TSS_CURRENT_STATE 1
+ #    else
+-       // fall back to the PyThread_tss_*() API, or ignore.
+-#      undef HAVE_THREAD_LOCAL
++#      ifdef HAVE_THREAD_LOCAL
++#        error "HAVE_THREAD_LOCAL is already defined"
++#      endif
++#      define HAVE_THREAD_LOCAL 1
++#      ifdef thread_local
++#        define _Py_thread_local thread_local
++#      elif __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_THREADS__)
++#        define _Py_thread_local _Thread_local
++#      elif defined(_MSC_VER)  /* AKA NT_THREADS */
++#        define _Py_thread_local __declspec(thread)
++#      elif defined(__GNUC__)  /* includes clang */
++#        define _Py_thread_local __thread
++#      else
++         // fall back to the PyThread_tss_*() API, or ignore.
++#        undef HAVE_THREAD_LOCAL
++#      endif
+ #    endif
+ #  endif
+ #endif
+--- a/Include/internal/pycore_runtime.h
++++ b/Include/internal/pycore_runtime.h
+@@ -287,6 +287,12 @@
+ 
+     /* Used for the thread state bound to the current thread. */
+     Py_tss_t autoTSSkey;
++
++#ifdef _Py_USE_TSS_CURRENT_STATE
++    /* Used for the thread state currently attached to this thread.  This is
++       distinct from autoTSSkey: a bound thread state need not be attached. */
++    Py_tss_t currentTSSkey;
++#endif
+ 
+     /* Used instead of PyThreadState.trash when there is not current tstate. */
+     Py_tss_t trashTSSkey;
+--- a/Include/internal/pycore_runtime_init.h
++++ b/Include/internal/pycore_runtime_init.h
+@@ -25,6 +25,11 @@
+ 
+ extern PyTypeObject _PyExc_MemoryError;
+ 
++#ifdef _Py_USE_TSS_CURRENT_STATE
++#  define _Py_CURRENT_TSS_INIT .currentTSSkey = Py_tss_NEEDS_INIT,
++#else
++#  define _Py_CURRENT_TSS_INIT
++#endif
+ 
+ /* The static initializers defined here should only be used
+    in the runtime init code (in pystate.c and pylifecycle.c). */
+@@ -159,6 +164,7 @@
+         /* A TSS key must be initialized with Py_tss_NEEDS_INIT \
+            in accordance with the specification. */ \
+         .autoTSSkey = Py_tss_NEEDS_INIT, \
++        _Py_CURRENT_TSS_INIT \
+         .parser = _parser_runtime_state_INIT, \
+         .ceval = { \
+             .pending_mainthread = { \
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -72,6 +72,12 @@
+ {
+ #ifdef HAVE_THREAD_LOCAL
+     return _Py_tss_tstate;
++#elif defined(_Py_USE_TSS_CURRENT_STATE)
++    Py_tss_t *key = &_PyRuntime.currentTSSkey;
++    if (!PyThread_tss_is_created(key)) {
++        return NULL;
++    }
++    return (PyThreadState *)PyThread_tss_get(key);
+ #else
+     // XXX Fall back to the PyThread_tss_*() API.
+ #  error "no supported thread-local variable storage classifier"
+@@ -79,11 +85,19 @@
+ }
+ 
+ static inline void
+-current_fast_set(_PyRuntimeState *Py_UNUSED(runtime), PyThreadState *tstate)
++current_fast_set(_PyRuntimeState *runtime, PyThreadState *tstate)
+ {
+     assert(tstate != NULL);
+ #ifdef HAVE_THREAD_LOCAL
++    (void)runtime;
+     _Py_tss_tstate = tstate;
++#elif defined(_Py_USE_TSS_CURRENT_STATE)
++    Py_tss_t *key = &runtime->currentTSSkey;
++    if (!PyThread_tss_is_created(key) ||
++        PyThread_tss_set(key, (void *)tstate) != 0)
++    {
++        Py_FatalError("failed to set current tstate (currentTSSkey)");
++    }
+ #else
+     // XXX Fall back to the PyThread_tss_*() API.
+ #  error "no supported thread-local variable storage classifier"
+@@ -91,10 +105,18 @@
+ }
+ 
+ static inline void
+-current_fast_clear(_PyRuntimeState *Py_UNUSED(runtime))
++current_fast_clear(_PyRuntimeState *runtime)
+ {
+ #ifdef HAVE_THREAD_LOCAL
++    (void)runtime;
+     _Py_tss_tstate = NULL;
++#elif defined(_Py_USE_TSS_CURRENT_STATE)
++    Py_tss_t *key = &runtime->currentTSSkey;
++    if (!PyThread_tss_is_created(key) ||
++        PyThread_tss_set(key, (void *)NULL) != 0)
++    {
++        Py_FatalError("failed to clear current tstate (currentTSSkey)");
++    }
+ #else
+     // XXX Fall back to the PyThread_tss_*() API.
+ #  error "no supported thread-local variable storage classifier"
+@@ -165,7 +187,7 @@
+  * don't reset TSS upon fork(), see issue #10517.
+  */
+ static PyStatus
+-tstate_tss_reinit(Py_tss_t *key)
++tstate_tss_reinit(Py_tss_t *key, const char *set_error)
+ {
+     if (!tstate_tss_initialized(key)) {
+         return _PyStatus_OK();
+@@ -177,10 +199,9 @@
+         return _PyStatus_NO_MEMORY();
+     }
+ 
+-    /* If the thread had an associated auto thread state, reassociate it with
+-     * the new key. */
++    /* Reassociate this thread's state with the new key. */
+     if (tstate && tstate_tss_set(key, tstate) != 0) {
+-        return _PyStatus_ERR("failed to re-set autoTSSkey");
++        return _PyStatus_ERR(set_error);
+     }
+     return _PyStatus_OK();
+ }
+@@ -206,7 +227,14 @@
+ #define _gilstate_tss_clear(runtime) \
+     tstate_tss_clear(&(runtime)->autoTSSkey)
+ #define gilstate_tss_reinit(runtime) \
+-    tstate_tss_reinit(&(runtime)->autoTSSkey)
++    tstate_tss_reinit(&(runtime)->autoTSSkey, \
++                      "failed to re-set autoTSSkey")
++
++#ifdef _Py_USE_TSS_CURRENT_STATE
++#  define current_tss_reinit(runtime) \
++    tstate_tss_reinit(&(runtime)->currentTSSkey, \
++                      "failed to re-set currentTSSkey")
++#endif
+ 
+ static inline void
+ gilstate_tss_set(_PyRuntimeState *runtime, PyThreadState *tstate)
+@@ -464,6 +492,13 @@
+         return _PyStatus_NO_MEMORY();
+     }
+ 
++#ifdef _Py_USE_TSS_CURRENT_STATE
++    if (PyThread_tss_create(&runtime->currentTSSkey) != 0) {
++        _PyRuntimeState_Fini(runtime);
++        return _PyStatus_NO_MEMORY();
++    }
++#endif
++
+     if (PyThread_tss_create(&runtime->trashTSSkey) != 0) {
+         _PyRuntimeState_Fini(runtime);
+         return _PyStatus_NO_MEMORY();
+@@ -487,6 +522,12 @@
+         gilstate_tss_fini(runtime);
+     }
+ 
++#ifdef _Py_USE_TSS_CURRENT_STATE
++    if (PyThread_tss_is_created(&runtime->currentTSSkey)) {
++        PyThread_tss_delete(&runtime->currentTSSkey);
++    }
++#endif
++
+     if (PyThread_tss_is_created(&runtime->trashTSSkey)) {
+         PyThread_tss_delete(&runtime->trashTSSkey);
+     }
+@@ -529,9 +570,16 @@
+     }
+ 
+     PyStatus status = gilstate_tss_reinit(runtime);
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++
++#ifdef _Py_USE_TSS_CURRENT_STATE
++    status = current_tss_reinit(runtime);
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++#endif
+ 
+     if (PyThread_tss_is_created(&runtime->trashTSSkey)) {
+         PyThread_tss_delete(&runtime->trashTSSkey);
+@@ -2469,6 +2517,10 @@
+     // a unique identifier for the current thread. Each thread has a unique
+     // _Py_tss_tstate variable with a unique address.
+     return (uintptr_t)&_Py_tss_tstate;
++#elif defined(_Py_USE_TSS_CURRENT_STATE)
++    /* Free-threaded builds need a value unique to the current live thread.
++       P2 has no native TLS address, so use the OS thread identifier. */
++    return (uintptr_t)PyThread_get_thread_ident();
+ #else
+ #  error "no supported thread-local variable storage classifier"
+ #endif
+--- a/Python/import.c
++++ b/Python/import.c
+@@ -740,7 +740,11 @@
+ _PyImport_ResolveNameWithPackageContext(const char *name)
+ {
+ #ifndef HAVE_THREAD_LOCAL
++#  ifdef _Py_USE_TSS_CURRENT_STATE
++    PyMutex_Lock(&EXTENSIONS.mutex);
++#  else
+     PyThread_acquire_lock(EXTENSIONS.mutex, WAIT_LOCK);
++#  endif
+ #endif
+     if (PKGCONTEXT != NULL) {
+         const char *p = strrchr(PKGCONTEXT, '.');
+@@ -750,7 +754,11 @@
+         }
+     }
+ #ifndef HAVE_THREAD_LOCAL
++#  ifdef _Py_USE_TSS_CURRENT_STATE
++    PyMutex_Unlock(&EXTENSIONS.mutex);
++#  else
+     PyThread_release_lock(EXTENSIONS.mutex);
++#  endif
+ #endif
+     return name;
+ }
+@@ -759,12 +767,20 @@
+ _PyImport_SwapPackageContext(const char *newcontext)
+ {
+ #ifndef HAVE_THREAD_LOCAL
++#  ifdef _Py_USE_TSS_CURRENT_STATE
++    PyMutex_Lock(&EXTENSIONS.mutex);
++#  else
+     PyThread_acquire_lock(EXTENSIONS.mutex, WAIT_LOCK);
++#  endif
+ #endif
+     const char *oldcontext = PKGCONTEXT;
+     PKGCONTEXT = newcontext;
+ #ifndef HAVE_THREAD_LOCAL
++#  ifdef _Py_USE_TSS_CURRENT_STATE
++    PyMutex_Unlock(&EXTENSIONS.mutex);
++#  else
+     PyThread_release_lock(EXTENSIONS.mutex);
++#  endif
+ #endif
+     return oldcontext;
+ }

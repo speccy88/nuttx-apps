@@ -28,24 +28,21 @@
 
 #include <sys/types.h>
 #include <sys/mount.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
 #include <sys/boardctl.h>
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <fcntl.h>
-#include <dirent.h>
 #include <errno.h>
 #include <nuttx/debug.h>
 
 #include <nuttx/drivers/ramdisk.h>
 
-#include "romfs_cpython_modules.h"
+#ifndef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
+#  include "romfs_cpython_modules.h"
+#endif
 
 #include "Python.h"
 
@@ -80,6 +77,11 @@
 #define MKMOUNT_DEVNAME(m) "/dev/ram" STR_RAMDEVNO(m)
 #define MOUNT_DEVNAME      MKMOUNT_DEVNAME(CONFIG_CPYTHON_ROMFS_RAMDEVNO)
 
+#ifdef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
+int board_cpython_runtime_prepare(int fd);
+int board_cpython_romfs_image(FAR const uint8_t **image, FAR size_t *length);
+#endif
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -87,6 +89,16 @@
 /****************************************************************************
  * Private Data
  ****************************************************************************/
+
+/* The launcher serializes every call into this file.  The ROM disk and mount
+ * outlive an individual CPython worker, so remember both successful stages
+ * in resident Hub data.  Keeping the registration stage separately makes a
+ * failed mount retryable without attempting to register the same minor
+ * twice.
+ */
+
+static bool g_cpython_romdisk_registered;
+static bool g_cpython_romfs_mounted;
 
 /****************************************************************************
  * Private Functions
@@ -110,32 +122,12 @@ static int check_and_mount_romfs(void)
 {
   int ret = OK;
   struct boardioc_romdisk_s desc;
-  FILE *fp;
-  char line[256];
-  int is_mounted = 0;
+#ifdef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
+  FAR const uint8_t *romfs_image;
+  size_t romfs_length;
+#endif
 
-  /* Check if the device is already mounted */
-
-  fp = fopen("/proc/fs/mount", "r");
-  if (fp == NULL)
-    {
-      printf("ERROR: Failed to open /proc/fs/mount\n");
-      UNUSED(desc);
-      return ret = ERROR;
-    }
-
-  while (fgets(line, sizeof(line), fp))
-    {
-      if (strstr(line, CONFIG_CPYTHON_ROMFS_MOUNTPOINT) != NULL)
-        {
-          is_mounted = 1;
-          break;
-        }
-    }
-
-  fclose(fp);
-
-  if (is_mounted)
+  if (g_cpython_romfs_mounted)
     {
       _info("Device is already mounted at %s\n",
             CONFIG_CPYTHON_ROMFS_MOUNTPOINT);
@@ -143,19 +135,39 @@ static int check_and_mount_romfs(void)
       return ret;
     }
 
-  /* Create a RAM disk */
+  /* Create the RAM disk once.  If mounting fails below, retain this stage so
+   * the next serialized invocation can retry only the mount.
+   */
 
-  desc.minor    = CONFIG_CPYTHON_ROMFS_RAMDEVNO;            /* Minor device number of the ROM disk. */
-  desc.nsectors = NSECTORS(romfs_cpython_modules_img_len);  /* The number of sectors in the ROM disk */
-  desc.sectsize = CONFIG_CPYTHON_ROMFS_SECTORSIZE;          /* The size of one sector in bytes */
-  desc.image    = (FAR uint8_t *)romfs_cpython_modules_img; /* File system image */
-
-  ret = boardctl(BOARDIOC_ROMDISK, (uintptr_t)&desc);
-
-  if (ret < 0)
+  if (!g_cpython_romdisk_registered)
     {
-      printf("ERROR: Failed to create RAM disk: %s\n", strerror(errno));
-      return 1;
+#ifdef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
+      ret = board_cpython_romfs_image(&romfs_image, &romfs_length);
+      if (ret < 0 || romfs_image == NULL || romfs_length == 0)
+        {
+          printf("ERROR: CPython external ROMFS is unavailable: %d\n", ret);
+          return 1;
+        }
+#else
+#  define romfs_image  romfs_cpython_modules_img
+#  define romfs_length romfs_cpython_modules_img_len
+#endif
+
+      desc.minor    = CONFIG_CPYTHON_ROMFS_RAMDEVNO;
+      desc.nsectors = NSECTORS(romfs_length);
+      desc.sectsize = CONFIG_CPYTHON_ROMFS_SECTORSIZE;
+      desc.image    = (FAR uint8_t *)romfs_image;
+
+      ret = boardctl(BOARDIOC_ROMDISK, (uintptr_t)&desc);
+
+      if (ret < 0)
+        {
+          printf("ERROR: Failed to create RAM disk: %s\n",
+                 strerror(errno));
+          return 1;
+        }
+
+      g_cpython_romdisk_registered = true;
     }
 
   /* Mount the test file system */
@@ -171,6 +183,7 @@ static int check_and_mount_romfs(void)
       return 1;
     }
 
+  g_cpython_romfs_mounted = true;
   return 0;
 }
 
@@ -179,12 +192,22 @@ static int check_and_mount_romfs(void)
  ****************************************************************************/
 
 /****************************************************************************
- * Name: python_wrapper_main
+ * Name: python_worker_main
  ****************************************************************************/
 
-int main(int argc, FAR char *argv[])
+int python_worker_main(int argc, FAR char *argv[])
 {
   int ret;
+
+#ifdef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
+  ret = board_cpython_runtime_prepare(STDIN_FILENO);
+  if (ret < 0)
+    {
+      printf("ERROR: CPython external runtime preparation failed: %d\n",
+             ret);
+      return 1;
+    }
+#endif
 
   ret = check_and_mount_romfs();
   if (ret != 0)

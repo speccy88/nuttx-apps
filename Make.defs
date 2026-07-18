@@ -23,6 +23,16 @@
 TOPDIR ?= $(APPDIR)/import
 -include $(TOPDIR)/Make.defs
 
+# Keep mutable application state in Hub RAM while allowing read-only tables
+# and strings to share CPython's external-memory container on Propeller 2.
+
+ifeq ($(CONFIG_ARCH_P2),y)
+ifeq ($(CONFIG_INTERPRETERS_CPYTHON),y)
+CFLAGS   += -mllvm -p2-externalize-constant-data
+CXXFLAGS += -mllvm -p2-externalize-constant-data
+endif
+endif
+
 # Application Directories
 
 # BUILDIRS is the list of top-level directories containing Make.defs files

@@ -18,14 +18,14 @@ being moved to PSRAM.
 
 Co-authored-by: Tiago Medicci Serrano <tiago.medicci@espressif.com>
 ---
- Python/pylifecycle.c | 11 +++++++++++
- 1 file changed, 11 insertions(+)
+ Python/pylifecycle.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
 
 diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
 index 1701a1cd217..93aa808bc03 100644
 --- a/Python/pylifecycle.c
 +++ b/Python/pylifecycle.c
-@@ -102,12 +102,23 @@ __attribute__((
+@@ -102,12 +102,27 @@ __attribute__((
  _PyRuntimeState _PyRuntime
  #if defined(__linux__) && (defined(__GNUC__) || defined(__clang__))
  __attribute__ ((section (".PyRuntime")))
@@ -38,7 +38,11 @@ index 1701a1cd217..93aa808bc03 100644
  static int runtime_initialized = 0;
  
 +void _PyRuntime_Early_Init(void) {
-+#if defined(ESP_PLATFORM) || defined(__NuttX__)
++#if defined(__propeller2__)
++    // The P2 loader materializes the static .p2.xdata initializer once;
++    // _PyRuntimeState_Init() resets clean repeated runs from CPython's initial
++    // template.  Expanding this assignment would exceed the overlay slot.
++#elif defined(ESP_PLATFORM) || defined(__NuttX__)
 +    // Normally, _PyRuntime is in .data and is initialized by the C runtime.
 +    // This function allows us to place it into external RAM .bss section
 +    // and initialize it manually, saving some internal RAM.
@@ -51,4 +55,3 @@ index 1701a1cd217..93aa808bc03 100644
  {
 -- 
 2.50.0
-

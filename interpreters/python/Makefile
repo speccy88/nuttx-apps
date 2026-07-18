@@ -45,6 +45,34 @@ TARGETINSTALL=$(INSTALLDIR)/target
 TARGETLIBPYTHON=$(TARGETINSTALL)/libpython$(CPYTHON_VERSION_MINOR).a
 TARGETMODULESPACK=$(TARGETBUILD)/lib/python$(shell echo $(CPYTHON_VERSION_MINOR) | tr -d .).zip
 TARGETMODULES=$(TARGETINSTALL)/lib/
+P2_CONFIGURE_LINKDIR=$(TARGETBUILD)/p2-configure-link
+P2_ROMFS_DIR=$(TARGETBUILD)/p2-romfs
+P2_CONFIGURE_CC=$(CC)
+P2_CONFIGURE_CXX=$(CXX)
+
+ifeq ($(CONFIG_ARCH_P2),y)
+P2_CONFIGURE_LINK_STAMP=$(P2_CONFIGURE_LINKDIR)/.prepared
+P2_CONFIGURE_LIBC=$(P2_CONFIGURE_LINKDIR)/libc.a
+P2_CONFIGURE_LIBP2=$(P2_CONFIGURE_LINKDIR)/libp2.a
+P2_CONFIGURE_LINKER=$(P2_CONFIGURE_LINKDIR)/p2.ld
+P2_CONFIGURE_DEPS=$(TOPDIR)$(DELIM).config \
+			  $(realpath $(TOPDIR)$(DELIM)Make.defs)
+P2_CONFIGURE_CC=$(CC) --target=p2
+P2_CONFIGURE_CXX=$(CXX) --target=p2
+CFLAGS += $(DEFINE_PREFIX)__NuttX__
+ifeq ($(CONFIG_P2_EC32MB_PSRAM_UNIFIED),y)
+P2_CPYTHON_CFLAGS += -mllvm -p2-unified-memory
+endif
+ifeq ($(CONFIG_P2_HUB_OVERLAYS),y)
+P2_OVERLAY_SLOT_ADDRESS=$(shell printf '0x%x' \
+	$$((0x7c000 - $(CONFIG_P2_HUB_OVERLAY_SLOT_SIZE))))
+P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlays
+P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlays-all
+P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlay-auto-groups=$(CONFIG_P2_HUB_OVERLAY_GROUP_COUNT)
+P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlay-slot-address=$(P2_OVERLAY_SLOT_ADDRESS)
+P2_CPYTHON_CFLAGS += -mllvm -p2-externalize-data
+endif
+endif
 
 CFLAGS += ${INCDIR_PREFIX}$(CPYTHON_PATH)$(DELIM)Include
 CFLAGS += ${INCDIR_PREFIX}$(CPYTHON_PATH)$(DELIM)Test
@@ -67,6 +95,7 @@ $(CPYTHON_ZIP):
 
 $(CPYTHON_UNPACKNAME): $(CPYTHON_ZIP)
 	@echo "Unpacking: $(CPYTHON_ZIP) -> $(CPYTHON_UNPACKNAME)"
+	$(Q) $(call DELDIR,$(CPYTHON_UNPACKNAME))
 	$(Q) $(UNPACK) $(CPYTHON_ZIP)
 	$(Q) mv	cpython-$(CPYTHON_VERSION) $(CPYTHON_UNPACKNAME)
 	@echo "Patching $(CPYTHON_UNPACKNAME)"
@@ -91,6 +120,7 @@ $(CPYTHON_UNPACKNAME): $(CPYTHON_ZIP)
 	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0019-undef-get_errno-set_errno-to-avoid-nuttx-macro-coll.patch
 	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0020-ctypes-skip-pythonapi-on-nuttx.patch
 	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0021-posixmodule-ignore-utime-enosys-on-nuttx.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0022-p2-use-dedicated-tss-for-current-thread-state.patch
 
 $(HOSTPYTHON):
 	mkdir -p $(HOSTBUILD)
@@ -134,6 +164,14 @@ endif
 ifneq ($(CONFIG_LIBC_DLFCN),y)
 	@echo "_ctypes" >> $@
 endif
+ifeq ($(CONFIG_ARCH_P2),y)
+	@echo "_socket" >> $@
+	@echo "_thread" >> $@
+	@echo "fcntl" >> $@
+	@echo "mmap" >> $@
+	@echo "syslog" >> $@
+	@echo "termios" >> $@
+endif
 
 # For the Python's `configure` script, please consider the following
 # when building for NuttX:
@@ -146,7 +184,30 @@ endif
 # Python/Modules/getpath.c (issue will be filed soon to track this
 # problem).
 
-$(TARGETBUILD)/Makefile: $(HOSTPYTHON) $(CONFIG_SITE) $(SETUP_LOCAL)
+ifeq ($(CONFIG_ARCH_P2),y)
+$(P2_CONFIGURE_LINKDIR):
+	$(Q) mkdir -p $@
+
+$(P2_CONFIGURE_LIBC) $(P2_CONFIGURE_LIBP2): | $(P2_CONFIGURE_LINKDIR)
+	$(Q) $(AR) $@
+
+$(P2_CONFIGURE_LINKER): p2-configure.ld | $(P2_CONFIGURE_LINKDIR)
+	$(Q) cp $< $@
+
+$(P2_CONFIGURE_LINK_STAMP): $(P2_CONFIGURE_LIBC) \
+				   $(P2_CONFIGURE_LIBP2) $(P2_CONFIGURE_LINKER)
+	$(Q) touch $@
+endif
+
+# Configure probes must remain resident and use ordinary P2 addressing.  The
+# unified-memory pass intentionally fails closed on unsupported intrinsics,
+# while overlay probes can acquire dispatcher references.  Neither outcome is
+# a truthful feature result.  Production objects receive all P2 transforms via
+# EXTRA_CFLAGS in the TARGETLIBPYTHON rule.
+
+$(TARGETBUILD)/Makefile: $(HOSTPYTHON) $(CONFIG_SITE) $(SETUP_LOCAL) \
+			 $(CURDIR)$(DELIM)Makefile $(P2_CONFIGURE_DEPS) \
+			 $(P2_CONFIGURE_LINK_STAMP)
 	$(Q) mkdir -p $(TARGETBUILD)/Modules
 	$(Q) mkdir -p $(TARGETMODULES)/python$(CPYTHON_VERSION_MINOR)
 	$(Q) ( cp Setup.local $(TARGETBUILD)/Modules/Setup.local )
@@ -157,9 +218,23 @@ $(TARGETBUILD)/Makefile: $(HOSTPYTHON) $(CONFIG_SITE) $(SETUP_LOCAL)
 			ARCH_CHIP=$(CONFIG_ARCH_CHIP); \
 			ARCH="$${ARCH//-/}"; \
 			ARCH_CHIP="$${ARCH_CHIP//-/}"; \
-			CFLAGS="$$(echo "$${CFLAGS}" | sed 's/-Os //')" \
-			CC="$(CC)" \
-			CXX="$(CXX)" \
+			CPYTHON_HOST="$${ARCH}-$${ARCH_CHIP}-nuttx"; \
+			if [ "$(CONFIG_ARCH_P2)" = "y" ]; then \
+				CPYTHON_HOST="p2-unknown-nuttx"; \
+				LDFLAGS="-L$(P2_CONFIGURE_LINKDIR)"; \
+				PKG_CONFIG=false; \
+				export LDFLAGS PKG_CONFIG; \
+			fi; \
+			CFLAGS="$$(echo "$${CFLAGS}" | sed -E \
+				-e 's/-Os[[:space:]]//g' \
+				-e 's/(^|[[:space:]])--target=p2([[:space:]]|$$)/\1/g' \
+				-e 's/-mllvm[[:space:]]+-p2-unified-memory([[:space:]]|$$)/\1/g' \
+				-e 's/-mllvm[[:space:]]+-p2-externalize-constant-data([[:space:]]|$$)/\1/g')"; \
+			CPP="$(P2_CONFIGURE_CC) $${CFLAGS} -E"; \
+			CFLAGS="$${CFLAGS}" \
+			CPP="$${CPP}" \
+			CC="$(P2_CONFIGURE_CC)" \
+			CXX="$(P2_CONFIGURE_CXX)" \
 			AR="$(AR)" \
 			ARFLAGS=" " \
 			MACHDEP="$(MACHDEP)" \
@@ -168,16 +243,21 @@ $(TARGETBUILD)/Makefile: $(HOSTPYTHON) $(CONFIG_SITE) $(SETUP_LOCAL)
 			$(CPYTHON_PATH)/configure \
 			 --prefix=${TARGETINSTALL} \
 			 --disable-shared \
-			 --host=$${ARCH}-$${ARCH_CHIP}-nuttx \
+			 --host=$${CPYTHON_HOST} \
 			 --build=$(shell $(CPYTHON_PATH)/config.guess) \
 			 --with-build-python=${HOSTPYTHON} \
 			 --without-mimalloc \
 			 --without-pymalloc \
+			 --without-computed-gotos \
 			 --disable-test-modules \
 			 --with-ensurepip=no \
 		)
-	$(Q) sed -i 's/^#define HAVE_LIBB2 1/\/* #undef HAVE_LIBB2 *\//' $(TARGETBUILD)/pyconfig.h
-	$(Q) sed -i 's/-lb2//g' $(TARGETBUILD)/Makefile
+	$(Q) sed 's/^#define HAVE_LIBB2 1/\/* #undef HAVE_LIBB2 *\//' \
+		$(TARGETBUILD)/pyconfig.h > $(TARGETBUILD)/pyconfig.h.tmp && \
+		mv $(TARGETBUILD)/pyconfig.h.tmp $(TARGETBUILD)/pyconfig.h
+	$(Q) sed 's/-lb2//g' $(TARGETBUILD)/Makefile > \
+		$(TARGETBUILD)/Makefile.tmp && \
+		mv $(TARGETBUILD)/Makefile.tmp $(TARGETBUILD)/Makefile
 
 BUNDLED_WHEELS_DIR = $(CPYTHON_PATH)/Lib/ensurepip/_bundled
 # PyPI downloads use the host system pip, not $(HOSTPYTHON)'s ensurepip bundle:
@@ -213,8 +293,11 @@ ifeq ($(CONFIG_INTERPRETERS_CPYTHON_INSTALL_NUTTX_PACKAGE),y)
 		$(HOSTPYTHON) $(CURDIR)/repack_wheel_add_pyc.py --package nuttx_periphery "$${NUTTX_WHEEL}"; \
 	)
 endif
-	$(MAKE) -C $(TARGETBUILD) regen-frozen
-	$(MAKE) -C $(TARGETBUILD) libpython$(CPYTHON_VERSION_MINOR).a wasm_stdlib
+	$(MAKE) -C $(TARGETBUILD) \
+		EXTRA_CFLAGS="$(P2_CPYTHON_CFLAGS)" regen-frozen
+	$(MAKE) -C $(TARGETBUILD) \
+		EXTRA_CFLAGS="$(P2_CPYTHON_CFLAGS)" \
+		libpython$(CPYTHON_VERSION_MINOR).a wasm_stdlib
 	$(Q) ( cp $(TARGETBUILD)/libpython$(CPYTHON_VERSION_MINOR).a $(TARGETLIBPYTHON) )
 	$(Q) $(UNPACK) $(TARGETMODULESPACK) -d $(TARGETMODULES)/python$(CPYTHON_VERSION_MINOR)
 ifneq ($(or $(filter y,$(CONFIG_INTERPRETERS_CPYTHON_ENABLE_PIP)),$(filter y,$(CONFIG_INTERPRETERS_CPYTHON_INSTALL_NUTTX_PACKAGE))),)
@@ -237,9 +320,10 @@ MODULE    = $(CONFIG_INTERPRETERS_CPYTHON)
 
 PROGNAME  += $(CONFIG_INTERPRETERS_CPYTHON_PROGNAME)
 PRIORITY  += $(CONFIG_INTERPRETERS_CPYTHON_PRIORITY)
-STACKSIZE += $(CONFIG_INTERPRETERS_CPYTHON_STACKSIZE)
+STACKSIZE += $(CONFIG_INTERPRETERS_CPYTHON_LAUNCHER_STACKSIZE)
 
-MAINSRC += python_wrapper.c
+MAINSRC += python_launcher.c
+CSRCS   += python_wrapper.c
 
 checkgenromfs:
 	@genromfs -h 1>/dev/null 2>&1 || { \
@@ -248,15 +332,28 @@ checkgenromfs:
  exit 1; \
 	}
 
+ifeq ($(CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS),y)
+romfs_cpython_modules.img : $(TARGETLIBPYTHON) checkgenromfs
+	$(Q) $(call DELDIR, $(P2_ROMFS_DIR))
+	$(Q) mkdir -p $(P2_ROMFS_DIR)
+	$(Q) cp $(TARGETMODULESPACK) \
+		$(P2_ROMFS_DIR)$(DELIM)python$(shell echo $(CPYTHON_VERSION_MINOR) | tr -d .).zip
+	@genromfs -f $@ -d $(P2_ROMFS_DIR) -V "CPython_P2" || { echo "genromfs failed" ; exit 1 ; }
+else
 romfs_cpython_modules.img : $(TARGETLIBPYTHON) checkgenromfs
 	@genromfs -f $@ -d $(TARGETMODULES) -V "ROMFS_Test" || { echo "genromfs failed" ; exit 1 ; }
+endif
 
+ifneq ($(CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS),y)
 romfs_cpython_modules.h : romfs_cpython_modules.img
 	@xxd -i $< | sed -e "s/^unsigned/static const unsigned/g" >$@ || { echo "xxd of $< failed" ; exit 1 ; }
 
-context:: $(CPYTHON_UNPACKNAME)
-
 depend:: romfs_cpython_modules.h
+else
+depend:: romfs_cpython_modules.img
+endif
+
+context:: $(CPYTHON_UNPACKNAME)
 
 distclean::
 	$(call DELDIR, $(BUILDIR))

@@ -30,5 +30,11 @@ EXTRA_LIBS += -lpython$(CPYTHON_VERSION_MINOR)
 EXTRA_LIBS += $(APPDIR)/interpreters/python/build/target/Modules/_hacl/libHacl_Hash_SHA2.a
 EXTRA_LIBS += $(APPDIR)/interpreters/python/build/target/Modules/expat/libexpat.a
 
+ifeq ($(CONFIG_P2_HUB_OVERLAYS),y)
+P2_OVERLAY_INPUTS += $(APPDIR)/interpreters/python/install/target/libpython$(CPYTHON_VERSION_MINOR).a
+P2_OVERLAY_INPUTS += $(APPDIR)/interpreters/python/build/target/Modules/_hacl/libHacl_Hash_SHA2.a
+P2_OVERLAY_INPUTS += $(APPDIR)/interpreters/python/build/target/Modules/expat/libexpat.a
+endif
+
 CONFIGURED_APPS += $(APPDIR)/interpreters/python
 endif
