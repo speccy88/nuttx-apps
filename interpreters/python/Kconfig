@@ -81,9 +81,22 @@ config INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
 	---help---
 		Do not compile the standard-library ROMFS into the application archive.
 		The board must validate and publish an immutable image through
-		board_cpython_runtime_prepare() and board_cpython_romfs_image().  This is
-		intended for targets such as Propeller 2 where the module image lives in
-		external unified memory.  The build still emits
+		board_cpython_runtime_prepare() and board_cpython_romfs_image(), validate
+		the writable runtime filesystem through board_cpython_tmpfs_validate(),
+		then register the image through board_cpython_romdisk_register().  The
+		registration hook must select buffered access when the returned pointer
+		is not a true CPU-addressable XIP mapping.  This is intended for targets such as
+		Propeller 2 where the module image lives in external unified memory.  The
+		build still emits
 		romfs_cpython_modules.img as a separately packaged artifact.
+
+config INTERPRETERS_CPYTHON_ROMFS_SECTORSIZE
+	int "CPython ROMFS block sector size"
+	default 64
+	range 16 4096
+	---help---
+		Sector size exposed by the CPython ROM disk.  External memories with a
+		non-trivial transfer setup cost benefit from a larger sector, at the
+		cost of one sector-sized filesystem cache allocation per open file.
 
 endif

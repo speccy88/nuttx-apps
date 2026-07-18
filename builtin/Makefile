@@ -82,3 +82,10 @@ distclean:: clean_context clean
 	$(call DELFILE, registry$(DELIM).updated)
 
 include $(APPDIR)/Application.mk
+
+# The P2 port deliberately uses a null dependency generator.  Keep the
+# generated registration table dependency explicit so that adding or removing
+# a builtin always recompiles the object which embeds that table.
+
+BUILTIN_LIST_OBJS := $(filter $(PREFIX)builtin_list.c%,$(COBJS))
+$(BUILTIN_LIST_OBJS): builtin_list.h builtin_proto.h

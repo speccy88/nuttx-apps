@@ -27,6 +27,11 @@
 #include <nuttx/config.h>
 #include <nuttx/mutex.h>
 
+#if defined(CONFIG_ARCH_P2) && defined(CONFIG_STACK_COLORATION)
+#  include <nuttx/arch.h>
+#  include <nuttx/sched.h>
+#endif
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -68,6 +73,34 @@ static FAR void *python_worker(FAR void *arg)
   FAR struct python_worker_args_s *args = arg;
 
   args->result = python_worker_main(args->argc, args->argv);
+
+#ifdef CONFIG_ARCH_P2
+  /* A test-body marker alone is insufficient evidence of a clean CPython
+   * shutdown: py_bytesmain() can still report a finalization failure after
+   * the script has printed it.  Expose the actual worker result so P2 HIL
+   * can require an exact zero exit before accepting stack telemetry.
+   */
+
+  printf("P2PY:WORKER:EXIT:CODE=%d\n", args->result);
+#endif
+
+#if defined(CONFIG_ARCH_P2) && defined(CONFIG_STACK_COLORATION)
+  {
+    FAR struct tcb_s *tcb = nxsched_self();
+    size_t size = tcb->adj_stack_size;
+    size_t used = up_check_tcbstack(tcb, size);
+
+    if (used > size)
+      {
+        printf("ERROR: CPython worker stack telemetry is invalid\n");
+      }
+    else
+      {
+        printf("P2PY:WORKER:STACK:FREE=%zu:SIZE=%zu\n", size - used, size);
+      }
+  }
+#endif
+
   return NULL;
 }
 

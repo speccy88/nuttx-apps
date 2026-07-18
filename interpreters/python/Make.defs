@@ -31,6 +31,9 @@ EXTRA_LIBS += $(APPDIR)/interpreters/python/build/target/Modules/_hacl/libHacl_H
 EXTRA_LIBS += $(APPDIR)/interpreters/python/build/target/Modules/expat/libexpat.a
 
 ifeq ($(CONFIG_P2_HUB_OVERLAYS),y)
+ifeq ($(CONFIG_P2_HUB_OVERLAY_ZLIB),y)
+P2_OVERLAY_INPUTS += $(TOPDIR)/staging/libapps.a
+endif
 P2_OVERLAY_INPUTS += $(APPDIR)/interpreters/python/install/target/libpython$(CPYTHON_VERSION_MINOR).a
 P2_OVERLAY_INPUTS += $(APPDIR)/interpreters/python/build/target/Modules/_hacl/libHacl_Hash_SHA2.a
 P2_OVERLAY_INPUTS += $(APPDIR)/interpreters/python/build/target/Modules/expat/libexpat.a

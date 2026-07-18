@@ -56,8 +56,8 @@
 #  define CONFIG_CPYTHON_ROMFS_RAMDEVNO 1
 #endif
 
-#ifndef CONFIG_CPYTHON_ROMFS_SECTORSIZE
-#  define CONFIG_CPYTHON_ROMFS_SECTORSIZE 64
+#ifndef CONFIG_INTERPRETERS_CPYTHON_ROMFS_SECTORSIZE
+#  define CONFIG_INTERPRETERS_CPYTHON_ROMFS_SECTORSIZE 64
 #endif
 
 #ifndef CONFIG_CPYTHON_ROMFS_MOUNTPOINT
@@ -72,14 +72,19 @@
 #  error "ROMFS support not enabled"
 #endif
 
-#define NSECTORS(b)        (((b)+CONFIG_CPYTHON_ROMFS_SECTORSIZE-1)/CONFIG_CPYTHON_ROMFS_SECTORSIZE)
+#define NSECTORS(b)        \
+  (((b) + CONFIG_INTERPRETERS_CPYTHON_ROMFS_SECTORSIZE - 1) / \
+   CONFIG_INTERPRETERS_CPYTHON_ROMFS_SECTORSIZE)
 #define STR_RAMDEVNO(m)    #m
 #define MKMOUNT_DEVNAME(m) "/dev/ram" STR_RAMDEVNO(m)
 #define MOUNT_DEVNAME      MKMOUNT_DEVNAME(CONFIG_CPYTHON_ROMFS_RAMDEVNO)
 
 #ifdef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
 int board_cpython_runtime_prepare(int fd);
+int board_cpython_tmpfs_validate(void);
 int board_cpython_romfs_image(FAR const uint8_t **image, FAR size_t *length);
+int board_cpython_romdisk_register(int minor, FAR const uint8_t *image,
+                                   uint32_t nsectors, uint16_t sectsize);
 #endif
 
 /****************************************************************************
@@ -121,7 +126,9 @@ static bool g_cpython_romfs_mounted;
 static int check_and_mount_romfs(void)
 {
   int ret = OK;
+#ifndef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
   struct boardioc_romdisk_s desc;
+#endif
 #ifdef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
   FAR const uint8_t *romfs_image;
   size_t romfs_length;
@@ -131,7 +138,6 @@ static int check_and_mount_romfs(void)
     {
       _info("Device is already mounted at %s\n",
             CONFIG_CPYTHON_ROMFS_MOUNTPOINT);
-      UNUSED(desc);
       return ret;
     }
 
@@ -153,21 +159,31 @@ static int check_and_mount_romfs(void)
 #  define romfs_length romfs_cpython_modules_img_len
 #endif
 
+#ifdef CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS
+      ret = board_cpython_romdisk_register(
+        CONFIG_CPYTHON_ROMFS_RAMDEVNO, romfs_image,
+        NSECTORS(romfs_length),
+        CONFIG_INTERPRETERS_CPYTHON_ROMFS_SECTORSIZE);
+#else
       desc.minor    = CONFIG_CPYTHON_ROMFS_RAMDEVNO;
       desc.nsectors = NSECTORS(romfs_length);
-      desc.sectsize = CONFIG_CPYTHON_ROMFS_SECTORSIZE;
+      desc.sectsize = CONFIG_INTERPRETERS_CPYTHON_ROMFS_SECTORSIZE;
       desc.image    = (FAR uint8_t *)romfs_image;
-
       ret = boardctl(BOARDIOC_ROMDISK, (uintptr_t)&desc);
+#endif
 
       if (ret < 0)
         {
-          printf("ERROR: Failed to create RAM disk: %s\n",
-                 strerror(errno));
+          printf("ERROR: Failed to create RAM disk: %d\n", ret);
           return 1;
         }
 
       g_cpython_romdisk_registered = true;
+#if defined(CONFIG_INTERPRETERS_CPYTHON_EXTERNAL_ROMFS) && \
+    defined(CONFIG_ARCH_P2)
+      printf("P2PY:ROMDISK:READY:MODE=BUFFERED:SECTOR=%u\n",
+             CONFIG_INTERPRETERS_CPYTHON_ROMFS_SECTORSIZE);
+#endif
     }
 
   /* Mount the test file system */
@@ -184,6 +200,9 @@ static int check_and_mount_romfs(void)
     }
 
   g_cpython_romfs_mounted = true;
+#ifdef CONFIG_ARCH_P2
+  printf("P2PY:ROMFS:MOUNTED\n");
+#endif
   return 0;
 }
 
@@ -207,6 +226,18 @@ int python_worker_main(int argc, FAR char *argv[])
              ret);
       return 1;
     }
+
+  ret = board_cpython_tmpfs_validate();
+  if (ret < 0)
+    {
+      printf("ERROR: CPython writable tmpfs is unavailable: %d\n", ret);
+      return 1;
+    }
+
+#  ifdef CONFIG_ARCH_P2
+  printf("P2PY:TMPFS:READY:PATH=%s:HEAP=%u\n",
+         CONFIG_LIBC_TMPDIR, CONFIG_FS_HEAPSIZE);
+#  endif
 #endif
 
   ret = check_and_mount_romfs();
@@ -215,13 +246,27 @@ int python_worker_main(int argc, FAR char *argv[])
       return ret;
     }
 
+#ifdef CONFIG_ARCH_P2
+  printf("P2PY:CPYTHON:EARLY:START\n");
+#endif
   _pyruntime_early_init();
+#ifdef CONFIG_ARCH_P2
+  printf("P2PY:CPYTHON:EARLY:PASS\n");
+#endif
 
-  setenv("PYTHONHOME", "/usr/local", 1);
+  if (setenv("PYTHONHOME", "/usr/local", 1) < 0 ||
+      setenv("PYTHON_BASIC_REPL", "1", 1) < 0 ||
+      setenv("PYTHONPATH", CONFIG_INTERPRETERS_CPYTHON_PYTHONPATH, 1) < 0 ||
+      setenv("HOME", CONFIG_LIBC_TMPDIR, 1) < 0 ||
+      setenv("PYTHONNOUSERSITE", "1", 1) < 0)
+    {
+      printf("ERROR: CPython runtime environment setup failed: %s\n",
+             strerror(errno));
+      return 1;
+    }
 
-  setenv("PYTHON_BASIC_REPL", "1", 1);
-
-  setenv("PYTHONPATH", CONFIG_INTERPRETERS_CPYTHON_PYTHONPATH, 1);
-
+#ifdef CONFIG_ARCH_P2
+  printf("P2PY:CPYTHON:RUN\n");
+#endif
   return py_bytesmain(argc, argv);
 }

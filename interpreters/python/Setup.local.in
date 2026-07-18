@@ -2,6 +2,12 @@
 # newlib configurations which do not support dynamic library
 # loading.
 
+# The P2 profile packages the standard library as a compressed ZIP inside
+# ROMFS.  zipimport requires the zlib builtin before it can import even the
+# encodings package during interpreter startup.  Keep this entry active and
+# before *disabled*; lines after that marker name modules to omit.
+zlib zlibmodule.c
+
 *disabled*
 _asyncio
 _bz2

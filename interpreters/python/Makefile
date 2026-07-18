@@ -165,7 +165,11 @@ ifneq ($(CONFIG_LIBC_DLFCN),y)
 	@echo "_ctypes" >> $@
 endif
 ifeq ($(CONFIG_ARCH_P2),y)
+	# Setup.local is in *disabled* mode.  P2 deliberately omits _thread:
+	# Hub overlays have one task owner and CPython is a single-interpreter,
+	# single-Python-task runtime on this profile.
 	@echo "_socket" >> $@
+	@echo "_interpreters" >> $@
 	@echo "_thread" >> $@
 	@echo "fcntl" >> $@
 	@echo "mmap" >> $@
@@ -205,6 +209,9 @@ endif
 # a truthful feature result.  Production objects receive all P2 transforms via
 # EXTRA_CFLAGS in the TARGETLIBPYTHON rule.
 
+# TARGETINSTALL is only a host staging directory.  Configure the target
+# runtime with target-native paths so sys.prefix, getpath, and packaged
+# _sysconfigdata never contain a host worktree pathname.
 $(TARGETBUILD)/Makefile: $(HOSTPYTHON) $(CONFIG_SITE) $(SETUP_LOCAL) \
 			 $(CURDIR)$(DELIM)Makefile $(P2_CONFIGURE_DEPS) \
 			 $(P2_CONFIGURE_LINK_STAMP)
@@ -241,7 +248,7 @@ $(TARGETBUILD)/Makefile: $(HOSTPYTHON) $(CONFIG_SITE) $(SETUP_LOCAL) \
 			OPT="-Os" \
 			CONFIG_SITE="$(CONFIG_SITE)" \
 			$(CPYTHON_PATH)/configure \
-			 --prefix=${TARGETINSTALL} \
+			 --prefix=/usr/local \
 			 --disable-shared \
 			 --host=$${CPYTHON_HOST} \
 			 --build=$(shell $(CPYTHON_PATH)/config.guess) \

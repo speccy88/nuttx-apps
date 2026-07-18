@@ -33,6 +33,24 @@ CFLAGS += -Dunix -Wno-shadow -Wno-strict-prototypes -Wno-undef
 CFLAGS += ${INCDIR_PREFIX}zlib
 zlib/test/infcover.c_CFLAGS += -Wno-format
 
+# The P2 Python profile needs zlib before it can import the DEFLATE-compressed
+# standard-library archive.  Keep the API builtin, but place its sizeable
+# implementation in the same validated Hub-overlay container as CPython.
+
+ifeq ($(CONFIG_ARCH_P2),y)
+ifeq ($(CONFIG_P2_HUB_OVERLAYS),y)
+ifeq ($(CONFIG_P2_HUB_OVERLAY_ZLIB),y)
+P2_ZLIB_OVERLAY_SLOT_ADDRESS=$(shell printf '0x%x' \
+	$$((0x7c000 - $(CONFIG_P2_HUB_OVERLAY_SLOT_SIZE))))
+CFLAGS += -mllvm -p2-hub-overlays
+CFLAGS += -mllvm -p2-hub-overlays-all
+CFLAGS += -mllvm -p2-hub-overlay-auto-groups=$(CONFIG_P2_HUB_OVERLAY_GROUP_COUNT)
+CFLAGS += -mllvm -p2-hub-overlay-slot-address=$(P2_ZLIB_OVERLAY_SLOT_ADDRESS)
+CFLAGS += -mllvm -p2-externalize-data
+endif
+endif
+endif
+
 ZLIB_ZIP = zlib13.zip
 ZLIB_SRC = zlib
 

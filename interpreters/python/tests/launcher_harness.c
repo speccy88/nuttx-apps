@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <nuttx/sched.h>
+
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
@@ -53,6 +55,10 @@ static int g_worker_calls;
 static int g_seen_argc;
 static char **g_seen_argv;
 static size_t g_seen_stack_size;
+static struct tcb_s g_worker_tcb =
+{
+  TEST_WORKER_STACK_SIZE
+};
 
 /****************************************************************************
  * Public Functions
@@ -84,6 +90,18 @@ int test_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     }
 
   return pthread_create(thread, attr, entry, arg);
+}
+
+struct tcb_s *nxsched_self(void)
+{
+  return &g_worker_tcb;
+}
+
+size_t up_check_tcbstack(struct tcb_s *tcb, size_t check_size)
+{
+  assert(tcb == &g_worker_tcb);
+  assert(check_size == TEST_WORKER_STACK_SIZE);
+  return 8192;
 }
 
 int python_worker_main(int argc, char *argv[])
