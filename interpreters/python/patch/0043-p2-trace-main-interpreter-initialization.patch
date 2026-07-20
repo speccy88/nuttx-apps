@@ -1,0 +1,29 @@
+From 4f588175367216cafee98b56463532598c6697e7 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 20:10:00 -0400
+Subject: [PATCH] p2: mark main interpreter initialization complete
+
+Emit one P2-only marker after the main interpreter has completed its
+initialization.  Keep the marker compact because the CPython startup overlay
+group is intentionally packed close to the fixed Hub slot limit.  Normal
+CPython builds and all initialization error paths remain unchanged.
+---
+ Python/pylifecycle.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -1324,6 +1324,10 @@ init_interp_main(PyThreadState *tstate)
+         }
+     }
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:MAIN:PASS\n");
++#endif
++
+     if (is_main_interp) {
+ #ifndef MS_WINDOWS
+         emit_stderr_warning_for_legacy_locale(interp->runtime);
+-- 
+2.50.1

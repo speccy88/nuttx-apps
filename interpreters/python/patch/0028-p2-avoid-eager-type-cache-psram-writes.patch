@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: avoid eager type-cache PSRAM writes
+
+The type lookup cache lives in external memory on P2.  Initializing every
+field of all 4096 entries turns a logically empty cache into 12288 scalar
+PSRAM stores during interpreter startup.
+
+Use 512 entries on P2 and retain their zero-initialized representation.
+Version tags assigned to types are nonzero and lookup names are real Unicode
+objects, so an entry with version zero and a NULL name cannot produce a hit.
+Make the update, collision, and after-fork ownership paths accept that NULL
+empty sentinel.  All other platforms keep the 4096-entry cache and eager
+Py_None initialization.
+---
+ Include/internal/pycore_typeobject.h |  8 ++++++--
+ Objects/typeobject.c                 | 22 +++++++++++++++-------
+ 2 files changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/Include/internal/pycore_typeobject.h b/Include/internal/pycore_typeobject.h
+--- a/Include/internal/pycore_typeobject.h
++++ b/Include/internal/pycore_typeobject.h
+@@ -46,11 +46,15 @@
+ #ifdef Py_GIL_DISABLED
+    _PySeqLock sequence;
+ #endif
+-    PyObject *name;        // reference to exactly a str or None
++    PyObject *name;        // exact str/None reference; NULL is empty
+     PyObject *value;       // borrowed reference or NULL
+ };
+ 
+-#define MCACHE_SIZE_EXP 12
++#if defined(__NuttX__) && defined(__propeller2__)
++#  define MCACHE_SIZE_EXP 9
++#else
++#  define MCACHE_SIZE_EXP 12
++#endif
+ 
+ struct type_cache {
+     struct type_cache_entry hashtable[1 << MCACHE_SIZE_EXP];
+diff --git a/Objects/typeobject.c b/Objects/typeobject.c
+--- a/Objects/typeobject.c
++++ b/Objects/typeobject.c
+@@ -831,6 +831,11 @@
+ _Py_P2_HUB_RESIDENT void
+ _PyType_InitCache(PyInterpreterState *interp)
+ {
++#if defined(__NuttX__) && defined(__propeller2__)
++    // P2 interpreter state is zero-initialized.  A NULL name is an empty
++    // cache entry, so avoid thousands of scalar PSRAM writes at startup.
++    (void)interp;
++#else
+     struct type_cache *cache = &interp->types.type_cache;
+     for (Py_ssize_t i = 0; i < (1 << MCACHE_SIZE_EXP); i++) {
+         struct type_cache_entry *entry = &cache->hashtable[i];
+@@ -842,6 +847,7 @@
+         entry->name = Py_None;
+         entry->value = NULL;
+     }
++#endif
+ }
+ 
+ 
+@@ -5143,9 +5149,11 @@
+     _Py_atomic_store_uint32_relaxed((uint32_t*) &entry->version, version_tag);
+     _Py_atomic_store_ptr_relaxed(&entry->value, value); /* borrowed */
+     assert(_PyASCIIObject_CAST(name)->hash != -1);
+-    OBJECT_STAT_INC_COND(type_cache_collisions, entry->name != Py_None && entry->name != name);
+-    // We're releasing this under the lock for simplicity sake because it's always a
+-    // exact unicode object or Py_None so it's safe to do so.
++    OBJECT_STAT_INC_COND(type_cache_collisions,
++                         entry->name != NULL && entry->name != Py_None &&
++                         entry->name != name);
++    // The old name is NULL, an exact unicode object, or Py_None, so the
++    // callers can release it with a NULL-safe decref.
+     PyObject *old_name = entry->name;
+     _Py_atomic_store_ptr_relaxed(&entry->name, Py_NewRef(name));
+     return old_name;
+@@ -5173,7 +5181,7 @@
+     // Then update sequence to the next valid value
+     _PySeqLock_UnlockWrite(&entry->sequence);
+ 
+-    Py_DECREF(old_value);
++    Py_XDECREF(old_value);
+ }
+ 
+ #endif
+@@ -5188,7 +5196,7 @@
+         if (_PySeqLock_AfterFork(&entry->sequence)) {
+             // Entry was in the process of updating while forking, clear it...
+             entry->value = NULL;
+-            Py_SETREF(entry->name, Py_None);
++            Py_XSETREF(entry->name, Py_None);
+             entry->version = 0;
+         }
+     }
+@@ -5285,7 +5293,7 @@
+         update_cache_gil_disabled(entry, name, version, res);
+ #else
+         PyObject *old_value = update_cache(entry, name, version, res);
+-        Py_DECREF(old_value);
++        Py_XDECREF(old_value);
+ #endif
+     }
+     return res;

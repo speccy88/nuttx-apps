@@ -1,0 +1,654 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 18 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: co-locate CPython startup hot path
+
+Keep the measured lifecycle and configuration translation units in one
+90-KiB-safe group, pin the allocator frontends and startup-hot thread services
+in Hub, and expose bounded startup stage markers for HIL diagnosis.  CPython
+configuration allocates and queries thread-local state repeatedly; crossing
+the single Hub execution slot for each of those calls otherwise reloads the
+large configuration caller on every return even when automatic groups
+preserve translation-unit locality.
+---
+ 16 files changed, 128 insertions(+), 65 deletions(-)
+
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -1,6 +1,12 @@
+ #ifndef Py_PYPORT_H
+ #define Py_PYPORT_H
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  define _Py_P2_HUB_RESIDENT __attribute__((p2_hub_resident))
++#else
++#  define _Py_P2_HUB_RESIDENT
++#endif
++
+ #ifndef UCHAR_MAX
+ #  error "<limits.h> header must define UCHAR_MAX"
+ #endif
+--- a/Include/pymem.h
++++ b/Include/pymem.h
+@@ -46,7 +46,7 @@
+ */
+ 
+-PyAPI_FUNC(void *) PyMem_Malloc(size_t size);
+-PyAPI_FUNC(void *) PyMem_Calloc(size_t nelem, size_t elsize);
+-PyAPI_FUNC(void *) PyMem_Realloc(void *ptr, size_t new_size);
+-PyAPI_FUNC(void) PyMem_Free(void *ptr);
++PyAPI_FUNC(void *) PyMem_Malloc(size_t size) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void *) PyMem_Calloc(size_t nelem, size_t elsize) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void *) PyMem_Realloc(void *ptr, size_t new_size) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void) PyMem_Free(void *ptr) _Py_P2_HUB_RESIDENT;
+ 
+@@ -92,10 +92,12 @@ PyAPI_FUNC(void) PyMem_Free(void *ptr);
+ // Usually, it's just a thin wrapper to functions of the standard C library:
+ // malloc(), calloc(), realloc() and free(). The difference is that
+ // tracemalloc can track these memory allocations.
+-PyAPI_FUNC(void *) PyMem_RawMalloc(size_t size);
+-PyAPI_FUNC(void *) PyMem_RawCalloc(size_t nelem, size_t elsize);
+-PyAPI_FUNC(void *) PyMem_RawRealloc(void *ptr, size_t new_size);
+-PyAPI_FUNC(void) PyMem_RawFree(void *ptr);
++PyAPI_FUNC(void *) PyMem_RawMalloc(size_t size) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void *) PyMem_RawCalloc(size_t nelem, size_t elsize)
++    _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void *) PyMem_RawRealloc(void *ptr, size_t new_size)
++    _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void) PyMem_RawFree(void *ptr) _Py_P2_HUB_RESIDENT;
+ #endif
+ 
+ #ifndef Py_LIMITED_API
+--- a/Include/objimpl.h
++++ b/Include/objimpl.h
+@@ -90,11 +90,11 @@
+    the object gets initialized via PyObject_{Init, InitVar} after obtaining
+    the raw memory.
+ */
+-PyAPI_FUNC(void *) PyObject_Malloc(size_t size);
++PyAPI_FUNC(void *) PyObject_Malloc(size_t size) _Py_P2_HUB_RESIDENT;
+ #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 >= 0x03050000
+-PyAPI_FUNC(void *) PyObject_Calloc(size_t nelem, size_t elsize);
++PyAPI_FUNC(void *) PyObject_Calloc(size_t nelem, size_t elsize) _Py_P2_HUB_RESIDENT;
+ #endif
+-PyAPI_FUNC(void *) PyObject_Realloc(void *ptr, size_t new_size);
+-PyAPI_FUNC(void) PyObject_Free(void *ptr);
++PyAPI_FUNC(void *) PyObject_Realloc(void *ptr, size_t new_size) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void) PyObject_Free(void *ptr) _Py_P2_HUB_RESIDENT;
+ 
+ 
+--- a/Include/cpython/pymem.h
++++ b/Include/cpython/pymem.h
+@@ -63,7 +63,8 @@ PyAPI_FUNC(void) PyMem_GetAllocator(PyMemAllocatorDomain domain,
+    PyMem_SetupDebugHooks() function must be called to reinstall the debug hooks
+    on top on the new allocator. */
+ PyAPI_FUNC(void) PyMem_SetAllocator(PyMemAllocatorDomain domain,
+-                                    PyMemAllocatorEx *allocator);
++                                    PyMemAllocatorEx *allocator)
++    _Py_P2_HUB_RESIDENT;
+ 
+ /* Setup hooks to detect bugs in the following Python memory allocator
+    functions:
+--- a/Include/internal/pycore_pymem.h
++++ b/Include/internal/pycore_pymem.h
+@@ -18,14 +18,14 @@ extern "C" {
+ PyAPI_FUNC(const char*) _PyMem_GetCurrentAllocatorName(void);
+ 
+ // strdup() using PyMem_RawMalloc()
+-extern char* _PyMem_RawStrdup(const char *str);
++extern char* _PyMem_RawStrdup(const char *str) _Py_P2_HUB_RESIDENT;
+ 
+ // strdup() using PyMem_Malloc().
+ // Export for '_pickle ' shared extension.
+ PyAPI_FUNC(char*) _PyMem_Strdup(const char *str);
+ 
+ // wcsdup() using PyMem_RawMalloc()
+-extern wchar_t* _PyMem_RawWcsdup(const wchar_t *str);
++extern wchar_t* _PyMem_RawWcsdup(const wchar_t *str) _Py_P2_HUB_RESIDENT;
+ 
+ typedef struct {
+     /* We tag each block with an API ID in order to tag API violations */
+@@ -60,7 +60,7 @@ struct _Py_mem_interp_free_queue {
+    Return on success, or return -1 if the domain is unknown. */
+ extern int _PyMem_SetDefaultAllocator(
+     PyMemAllocatorDomain domain,
+-    PyMemAllocatorEx *old_alloc);
++    PyMemAllocatorEx *old_alloc) _Py_P2_HUB_RESIDENT;
+ 
+ /* Special bytes broadcast into debug memory blocks at appropriate times.
+    Strings of these are unlikely to be valid addresses, floats, ints or
+--- a/Include/internal/pycore_pymem_init.h
++++ b/Include/internal/pycore_pymem_init.h
+@@ -12,10 +12,10 @@ extern "C" {
+ /********************************/
+ /* the allocators' initializers */
+ 
+-extern void * _PyMem_RawMalloc(void *, size_t);
+-extern void * _PyMem_RawCalloc(void *, size_t, size_t);
+-extern void * _PyMem_RawRealloc(void *, void *, size_t);
+-extern void _PyMem_RawFree(void *, void *);
++extern void * _PyMem_RawMalloc(void *, size_t) _Py_P2_HUB_RESIDENT;
++extern void * _PyMem_RawCalloc(void *, size_t, size_t) _Py_P2_HUB_RESIDENT;
++extern void * _PyMem_RawRealloc(void *, void *, size_t) _Py_P2_HUB_RESIDENT;
++extern void _PyMem_RawFree(void *, void *) _Py_P2_HUB_RESIDENT;
+ #define PYRAW_ALLOC {NULL, _PyMem_RawMalloc, _PyMem_RawCalloc, _PyMem_RawRealloc, _PyMem_RawFree}
+ 
+ #ifdef Py_GIL_DISABLED
+--- a/Include/pythread.h
++++ b/Include/pythread.h
+@@ -18,7 +18,7 @@ typedef enum PyLockStatus {
+ PyAPI_FUNC(void) PyThread_init_thread(void);
+ PyAPI_FUNC(unsigned long) PyThread_start_new_thread(void (*)(void *), void *);
+ PyAPI_FUNC(void) _Py_NO_RETURN PyThread_exit_thread(void);
+-PyAPI_FUNC(unsigned long) PyThread_get_thread_ident(void);
++PyAPI_FUNC(unsigned long) PyThread_get_thread_ident(void) _Py_P2_HUB_RESIDENT;
+ 
+ #if (defined(__APPLE__) || defined(__linux__) || defined(_WIN32) \
+      || defined(__FreeBSD__) || defined(__FreeBSD_kernel__) \
+@@ -28,8 +28,9 @@ PyAPI_FUNC(unsigned long) PyThread_get_thread_ident(void);
+ PyAPI_FUNC(unsigned long) PyThread_get_thread_native_id(void);
+ #endif
+ 
+-PyAPI_FUNC(PyThread_type_lock) PyThread_allocate_lock(void);
+-PyAPI_FUNC(void) PyThread_free_lock(PyThread_type_lock);
++PyAPI_FUNC(PyThread_type_lock) PyThread_allocate_lock(void)
++    _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void) PyThread_free_lock(PyThread_type_lock) _Py_P2_HUB_RESIDENT;
+ PyAPI_FUNC(int) PyThread_acquire_lock(PyThread_type_lock, int);
+ #define WAIT_LOCK       1
+ #define NOWAIT_LOCK     0
+@@ -89,15 +90,16 @@ Py_DEPRECATED(3.7) PyAPI_FUNC(void) PyThread_ReInitTLS(void);
+ 
+ typedef struct _Py_tss_t Py_tss_t;  /* opaque */
+ 
+-PyAPI_FUNC(Py_tss_t *) PyThread_tss_alloc(void);
+-PyAPI_FUNC(void) PyThread_tss_free(Py_tss_t *key);
++PyAPI_FUNC(Py_tss_t *) PyThread_tss_alloc(void) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void) PyThread_tss_free(Py_tss_t *key) _Py_P2_HUB_RESIDENT;
+ 
+ /* The parameter key must not be NULL. */
+-PyAPI_FUNC(int) PyThread_tss_is_created(Py_tss_t *key);
+-PyAPI_FUNC(int) PyThread_tss_create(Py_tss_t *key);
+-PyAPI_FUNC(void) PyThread_tss_delete(Py_tss_t *key);
+-PyAPI_FUNC(int) PyThread_tss_set(Py_tss_t *key, void *value);
+-PyAPI_FUNC(void *) PyThread_tss_get(Py_tss_t *key);
++PyAPI_FUNC(int) PyThread_tss_is_created(Py_tss_t *key) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(int) PyThread_tss_create(Py_tss_t *key) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void) PyThread_tss_delete(Py_tss_t *key) _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(int) PyThread_tss_set(Py_tss_t *key, void *value)
++    _Py_P2_HUB_RESIDENT;
++PyAPI_FUNC(void *) PyThread_tss_get(Py_tss_t *key) _Py_P2_HUB_RESIDENT;
+ #endif  /* New in 3.7 */
+ 
+ #ifndef Py_LIMITED_API
+--- a/Include/internal/pycore_pythread.h
++++ b/Include/internal/pycore_pythread.h
+@@ -122,7 +122,8 @@ typedef Py_uintptr_t PyThread_handle_t;
+ #define PY_FORMAT_THREAD_IDENT_T "llu"
+ #define Py_PARSE_THREAD_IDENT_T "K"
+ 
+-PyAPI_FUNC(PyThread_ident_t) PyThread_get_thread_ident_ex(void);
++PyAPI_FUNC(PyThread_ident_t) PyThread_get_thread_ident_ex(void)
++    _Py_P2_HUB_RESIDENT;
+ 
+ /* Thread joining APIs.
+  *
+--- a/Objects/obmalloc.c
++++ b/Objects/obmalloc.c
+@@ -51,7 +51,7 @@ static void set_allocator_unlocked(PyMemAllocatorDomain, PyMemAllocatorEx *);
+ 
+ /* the default raw allocator (wraps malloc) */
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ _PyMem_RawMalloc(void *Py_UNUSED(ctx), size_t size)
+ {
+     /* PyMem_RawMalloc(0) means malloc(1). Some systems would return NULL
+@@ -63,7 +63,7 @@ _PyMem_RawMalloc(void *Py_UNUSED(ctx), size_t size)
+     return malloc(size);
+ }
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ _PyMem_RawCalloc(void *Py_UNUSED(ctx), size_t nelem, size_t elsize)
+ {
+     /* PyMem_RawCalloc(0, 0) means calloc(1, 1). Some systems would return NULL
+@@ -77,7 +77,7 @@ _PyMem_RawCalloc(void *Py_UNUSED(ctx), size_t nelem, size_t elsize)
+     return calloc(nelem, elsize);
+ }
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ _PyMem_RawRealloc(void *Py_UNUSED(ctx), void *ptr, size_t size)
+ {
+     if (size == 0)
+@@ -84,7 +84,7 @@ _PyMem_RawRealloc(void *Py_UNUSED(ctx), void *ptr, size_t size)
+     return realloc(ptr, size);
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ _PyMem_RawFree(void *Py_UNUSED(ctx), void *ptr)
+ {
+     free(ptr);
+@@ -453,7 +453,7 @@ set_allocator_unlocked(PyMemAllocatorDomain domain, PyMemAllocatorEx *allocator)
+ /* managing the allocators */
+ /***************************/
+ 
+-static int
++_Py_P2_HUB_RESIDENT static int
+ set_default_allocator_unlocked(PyMemAllocatorDomain domain, int debug,
+                                PyMemAllocatorEx *old_alloc)
+ {
+@@ -492,7 +492,7 @@ static const int pydebug = 0;
+ #endif
+ 
+ 
+-int
++_Py_P2_HUB_RESIDENT int
+ _PyMem_SetDefaultAllocator(PyMemAllocatorDomain domain,
+                            PyMemAllocatorEx *old_alloc)
+ {
+@@ -875,7 +875,7 @@ PyMem_GetAllocator(PyMemAllocatorDomain domain, PyMemAllocatorEx *allocator)
+     PyMutex_Unlock(&ALLOCATORS_MUTEX);
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ PyMem_SetAllocator(PyMemAllocatorDomain domain, PyMemAllocatorEx *allocator)
+ {
+     PyMutex_Lock(&ALLOCATORS_MUTEX);
+@@ -935,7 +935,7 @@ _PyObject_VirtualFree(void *obj, size_t size)
+ /* the "raw" allocator */
+ /***********************/
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyMem_RawMalloc(size_t size)
+ {
+     /*
+@@ -949,7 +949,7 @@ PyMem_RawMalloc(size_t size)
+     return _PyMem_Raw.malloc(_PyMem_Raw.ctx, size);
+ }
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyMem_RawCalloc(size_t nelem, size_t elsize)
+ {
+     /* see PyMem_RawMalloc() */
+@@ -958,7 +958,7 @@ PyMem_RawCalloc(size_t nelem, size_t elsize)
+     return _PyMem_Raw.calloc(_PyMem_Raw.ctx, nelem, elsize);
+ }
+ 
+-void*
++_Py_P2_HUB_RESIDENT void*
+ PyMem_RawRealloc(void *ptr, size_t new_size)
+ {
+     /* see PyMem_RawMalloc() */
+@@ -967,7 +967,7 @@ PyMem_RawRealloc(void *ptr, size_t new_size)
+     return _PyMem_Raw.realloc(_PyMem_Raw.ctx, ptr, new_size);
+ }
+ 
+-void PyMem_RawFree(void *ptr)
++_Py_P2_HUB_RESIDENT void PyMem_RawFree(void *ptr)
+ {
+     _PyMem_Raw.free(_PyMem_Raw.ctx, ptr);
+ }
+@@ -976,7 +976,7 @@ PyMem_RawFree(void *ptr)
+ /* the "mem" allocator */
+ /***********************/
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyMem_Malloc(size_t size)
+ {
+     /* see PyMem_RawMalloc() */
+@@ -989,7 +989,7 @@ PyMem_Malloc(size_t size)
+     return _PyMem.malloc(_PyMem.ctx, size);
+ }
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyMem_Calloc(size_t nelem, size_t elsize)
+ {
+     /* see PyMem_RawMalloc() */
+@@ -1002,7 +1002,7 @@ PyMem_Calloc(size_t nelem, size_t elsize)
+     return _PyMem.calloc(_PyMem.ctx, nelem, elsize);
+ }
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyMem_Realloc(void *ptr, size_t new_size)
+ {
+     /* see PyMem_RawMalloc() */
+@@ -1011,7 +1011,7 @@ PyMem_Realloc(void *ptr, size_t new_size)
+     return _PyMem.realloc(_PyMem.ctx, ptr, new_size);
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ PyMem_Free(void *ptr)
+ {
+     OBJECT_STAT_INC(frees);
+@@ -1024,7 +1024,7 @@ PyMem_Free(void *ptr)
+ /* pymem utility functions */
+ /***************************/
+ 
+-wchar_t*
++_Py_P2_HUB_RESIDENT wchar_t*
+ _PyMem_RawWcsdup(const wchar_t *str)
+ {
+     assert(str != NULL);
+@@ -1044,7 +1044,7 @@ _PyMem_RawWcsdup(const wchar_t *str)
+     return str2;
+ }
+ 
+-char *
++_Py_P2_HUB_RESIDENT char *
+ _PyMem_RawStrdup(const char *str)
+ {
+     assert(str != NULL);
+@@ -1289,7 +1289,7 @@ _PyMem_FiniDelayed(PyInterpreterState *interp)
+ /* the "object" allocator */
+ /**************************/
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyObject_Malloc(size_t size)
+ {
+     /* see PyMem_RawMalloc() */
+@@ -1302,7 +1302,7 @@ PyObject_Malloc(size_t size)
+     return _PyObject.malloc(_PyObject.ctx, size);
+ }
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyObject_Calloc(size_t nelem, size_t elsize)
+ {
+     /* see PyMem_RawMalloc() */
+@@ -1315,7 +1315,7 @@ PyObject_Calloc(size_t nelem, size_t elsize)
+     return _PyObject.calloc(_PyObject.ctx, nelem, elsize);
+ }
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyObject_Realloc(void *ptr, size_t new_size)
+ {
+     /* see PyMem_RawMalloc() */
+@@ -1324,7 +1324,7 @@ PyObject_Realloc(void *ptr, size_t new_size)
+     return _PyObject.realloc(_PyObject.ctx, ptr, new_size);
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ PyObject_Free(void *ptr)
+ {
+     OBJECT_STAT_INC(frees);
+--- a/Python/thread.c
++++ b/Python/thread.c
+@@ -182,7 +182,7 @@ PyThread_acquire_lock_timed_with_retries(PyThread_type_lock lock,
+    Cross-platform components of TSS API implementation.
+ */
+ 
+-Py_tss_t *
++_Py_P2_HUB_RESIDENT Py_tss_t *
+ PyThread_tss_alloc(void)
+ {
+     Py_tss_t *new_key = (Py_tss_t *)PyMem_RawMalloc(sizeof(Py_tss_t));
+@@ -193,7 +193,7 @@ PyThread_tss_alloc(void)
+     return new_key;
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ PyThread_tss_free(Py_tss_t *key)
+ {
+     if (key != NULL) {
+@@ -202,7 +202,7 @@ PyThread_tss_free(Py_tss_t *key)
+     }
+ }
+ 
+-int
++_Py_P2_HUB_RESIDENT int
+ PyThread_tss_is_created(Py_tss_t *key)
+ {
+     assert(key != NULL);
+--- a/Python/thread_pthread.h
++++ b/Python/thread_pthread.h
+@@ -353,6 +353,6 @@ PyThread_detach_thread(PyThread_handle_t th) {
+      - It is not clear that the 'volatile' (for AIX?) are any longer necessary.
+ */
+-PyThread_ident_t
++_Py_P2_HUB_RESIDENT PyThread_ident_t
+ PyThread_get_thread_ident_ex(void) {
+     volatile pthread_t threadid;
+     if (!initialized)
+@@ -363,7 +363,7 @@ PyThread_get_thread_ident_ex(void) {
+     return (PyThread_ident_t) threadid;
+ }
+ 
+-unsigned long
++_Py_P2_HUB_RESIDENT unsigned long
+ PyThread_get_thread_ident(void)
+ {
+     return (unsigned long) PyThread_get_thread_ident_ex();
+@@ -425,7 +425,7 @@ PyThread_exit_thread(void)
+  * Lock support.
+  */
+ 
+-PyThread_type_lock
++_Py_P2_HUB_RESIDENT PyThread_type_lock
+ PyThread_allocate_lock(void)
+ {
+     sem_t *lock;
+@@ -450,7 +450,7 @@ PyThread_allocate_lock(void)
+     return (PyThread_type_lock)lock;
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ PyThread_free_lock(PyThread_type_lock lock)
+ {
+     sem_t *thelock = (sem_t *)lock;
+@@ -613,7 +613,7 @@ PyThread_release_lock(PyThread_type_lock lock)
+ /*
+  * Lock support.
+  */
+-PyThread_type_lock
++_Py_P2_HUB_RESIDENT PyThread_type_lock
+ PyThread_allocate_lock(void)
+ {
+     pthread_lock *lock;
+@@ -648,7 +648,7 @@ PyThread_allocate_lock(void)
+     return (PyThread_type_lock) lock;
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ PyThread_free_lock(PyThread_type_lock lock)
+ {
+     pthread_lock *thelock = (pthread_lock *)lock;
+@@ -933,7 +933,7 @@ PyThread_ReInitTLS(void)
+    Platform-specific components of TSS API implementation.
+ */
+ 
+-int
++_Py_P2_HUB_RESIDENT int
+ PyThread_tss_create(Py_tss_t *key)
+ {
+     assert(key != NULL);
+@@ -950,7 +950,7 @@ PyThread_tss_create(Py_tss_t *key)
+     return 0;
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ PyThread_tss_delete(Py_tss_t *key)
+ {
+     assert(key != NULL);
+@@ -964,7 +964,7 @@ PyThread_tss_delete(Py_tss_t *key)
+     key->_is_initialized = 0;
+ }
+ 
+-int
++_Py_P2_HUB_RESIDENT int
+ PyThread_tss_set(Py_tss_t *key, void *value)
+ {
+     assert(key != NULL);
+@@ -972,7 +972,7 @@ PyThread_tss_set(Py_tss_t *key, void *value)
+     return fail ? -1 : 0;
+ }
+ 
+-void *
++_Py_P2_HUB_RESIDENT void *
+ PyThread_tss_get(Py_tss_t *key)
+ {
+     assert(key != NULL);
+--- a/Modules/main.c
++++ b/Modules/main.c
+@@ -26,6 +26,15 @@
+ #define COPYRIGHT \
+     "Type \"help\", \"copyright\", \"credits\" or \"license\" " \
+     "for more information."
++
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
++                               apply_to = function)
++#  define P2_CPYTHON_STAGE(marker) \
++    printf("P2PY:CPYTHON:MAIN:" marker "\n")
++#else
++#  define P2_CPYTHON_STAGE(marker) ((void)0)
++#endif
+ 
+ /* --- pymain_init() ---------------------------------------------- */
+ 
+@@ -34,10 +43,12 @@
+ {
+     PyStatus status;
+ 
++    P2_CPYTHON_STAGE("ENTER");
+     status = _PyRuntime_Initialize();
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++    P2_CPYTHON_STAGE("RUNTIME:PASS");
+ 
+     PyPreConfig preconfig;
+     PyPreConfig_InitPythonConfig(&preconfig);
+@@ -46,6 +57,7 @@
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++    P2_CPYTHON_STAGE("PREINIT:PASS");
+ 
+     PyConfig config;
+     PyConfig_InitPythonConfig(&config);
+@@ -61,11 +73,13 @@
+     if (_PyStatus_EXCEPTION(status)) {
+         goto done;
+     }
++    P2_CPYTHON_STAGE("ARGV:PASS");
+ 
+     status = Py_InitializeFromConfig(&config);
+     if (_PyStatus_EXCEPTION(status)) {
+         goto done;
+     }
++    P2_CPYTHON_STAGE("INITIALIZED:PASS");
+     status = _PyStatus_OK();
+ 
+ done:
+@@ -828,3 +842,7 @@
+         .wchar_argv = NULL};
+     return pymain_main(&args);
+ }
++
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute pop
++#endif
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -42,6 +42,11 @@
+ #  include <unistd.h>             // isatty()
+ #endif
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
++                               apply_to = function)
++#endif
++
+ #if defined(__APPLE__)
+ #  include <mach-o/loader.h>
+ #endif
+@@ -3516,3 +3521,7 @@
+     return oldhandler;
+ #endif
+ }
++
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute pop
++#endif
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -40,6 +40,10 @@
+ #  endif
+ #endif
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
++                               apply_to = function)
++#endif
+ 
+ /****************************************/
+ /* helpers for the current thread state */
+@@ -3164,3 +3168,7 @@
+     }
+ #endif
+ }
++
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute pop
++#endif
+--- a/Python/preconfig.c
++++ b/Python/preconfig.c
+@@ -9,6 +9,10 @@
+ #include <locale.h>               // setlocale()
+ #include <stdlib.h>               // getenv()
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
++                               apply_to = function)
++#endif
+ 
+ /* Forward declarations */
+ static void
+@@ -976,3 +980,7 @@
+ 
+     return _PyStatus_OK();
+ }
++
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute pop
++#endif
+--- a/Python/initconfig.c
++++ b/Python/initconfig.c
+@@ -26,6 +26,10 @@
+ 
+ #include "config_common.h"
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
++                               apply_to = function)
++#endif
+ 
+ /* --- PyConfig spec ---------------------------------------------- */
+ 
+@@ -3248,3 +3252,7 @@
+ 
+     _PyErr_SetRaisedException(tstate, exc);
+ }
++
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute pop
++#endif
+-- 
+2.50.0

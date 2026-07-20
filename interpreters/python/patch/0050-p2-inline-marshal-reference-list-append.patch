@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 20 Jul 2026 06:20:00 -0400
+Subject: [PATCH] p2: inline marshal reference-list append
+
+The r10 startup trace recorded at least 468 transitions between marshal's
+21,608-byte group 78 and list append's 32,084-byte group 164.  Reloading both
+groups for each round trip costs at least 25,127,856 overlay bytes before the
+interpreter reaches the REPL.  marshal.o has exactly two PyList_Append
+relocations, in r_ref_reserve and r_ref.
+
+Use the internal append-take-reference helper directly for those two P2-only
+sites.  This retains PyList_Append's critical section and new-reference
+semantics while allowing the capacity-available path to inline into marshal.
+Keep the generic PyList_Append source byte-for-byte in the #else branches and
+retain r_ref's original-object cleanup on failure.
+
+The exact target probe grew group 78 from 0x5468 to 0x5584 (284 bytes), leaving
+68,220 bytes of slot headroom, and removed both PyList_Append relocations.
+Capacity growth still calls _PyList_AppendTakeRefListResize, so the first and
+growth-boundary appends can still cross overlays; this only removes the common
+capacity-available edge.
+---
+ Python/marshal.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/Python/marshal.c b/Python/marshal.c
+--- a/Python/marshal.c
++++ b/Python/marshal.c
+@@ -11,6 +11,9 @@
+ #include "pycore_code.h"             // _PyCode_New()
+ #include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION()
+ #include "pycore_hashtable.h"        // _Py_hashtable_t
+ #include "pycore_long.h"             // _PyLong_DigitCount
++#if defined(__NuttX__) && defined(__propeller2__)
++#  include "pycore_list.h"           // _PyList_AppendTakeRef()
++#endif
+ #include "pycore_setobject.h"        // _PySet_NextEntry()
+ #include "marshal.h"                 // Py_MARSHAL_VERSION
+@@ -953,12 +956,22 @@ r_ref_reserve(int flag, RFILE *p)
+ r_ref_reserve(int flag, RFILE *p)
+ {
+     if (flag) { /* currently only FLAG_REF is defined */
+         Py_ssize_t idx = PyList_GET_SIZE(p->refs);
+         if (idx >= 0x7ffffffe) {
+             PyErr_SetString(PyExc_ValueError, "bad marshal data (index list too large)");
+             return -1;
+         }
++#if defined(__NuttX__) && defined(__propeller2__)
++        int err;
++
++        Py_BEGIN_CRITICAL_SECTION(p->refs);
++        err = _PyList_AppendTakeRef((PyListObject *)p->refs,
++                                    Py_NewRef(Py_None));
++        Py_END_CRITICAL_SECTION();
++        if (err < 0)
++#else
+         if (PyList_Append(p->refs, Py_None) < 0)
++#endif
+             return -1;
+         return idx;
+     } else
+@@ -992,10 +1005,19 @@ r_ref(PyObject *o, int flag, RFILE *p)
+ r_ref(PyObject *o, int flag, RFILE *p)
+ {
+     assert(flag & FLAG_REF);
+     if (o == NULL)
+         return NULL;
++#if defined(__NuttX__) && defined(__propeller2__)
++    int err;
++
++    Py_BEGIN_CRITICAL_SECTION(p->refs);
++    err = _PyList_AppendTakeRef((PyListObject *)p->refs, Py_NewRef(o));
++    Py_END_CRITICAL_SECTION();
++    if (err < 0) {
++#else
+     if (PyList_Append(p->refs, o) < 0) {
++#endif
+         Py_DECREF(o); /* release the new object */
+         return NULL;
+     }
+     return o;
+--
+2.50.1

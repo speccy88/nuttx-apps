@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: add default no-site config hook
+
+Let the NuttX P2 wrapper suppress automatic site processing without changing
+the caller's argv.  Py_BytesMain uses PyConfig_InitPythonConfig(), which
+deliberately ignores the deprecated Py_NoSiteFlag compatibility global, so a
+small P2-only hook carries the board policy into PyConfig.site_import before
+normal argument parsing and initialization.  Explicit import site and
+site.main() remain available.
+---
+ Modules/main.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/Modules/main.c b/Modules/main.c
+--- a/Modules/main.c
++++ b/Modules/main.c
+@@ -28,7 +28,18 @@
+ #define COPYRIGHT \
+     "Type \"help\", \"copyright\", \"credits\" or \"license\" " \
+     "for more information."
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++static int p2_default_no_site
++    __attribute__((section(".p2.hub.data")));
++
++_Py_P2_HUB_RESIDENT void
++py_p2_set_default_no_site(void)
++{
++    p2_default_no_site = 1;
++}
++#endif
++
+ #if defined(__NuttX__) && defined(__propeller2__)
+ #  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
+                                apply_to = function)
+@@ -61,6 +72,12 @@ pymain_init(const _PyArgv *args)
+     PyConfig config;
+     PyConfig_InitPythonConfig(&config);
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++    if (p2_default_no_site) {
++        config.site_import = 0;
++    }
++#endif
++
+     /* pass NULL as the config: config is read from command line arguments,
+        environment variables, configuration files */
+     if (args->use_bytes_argv) {
+-- 
+2.39.5

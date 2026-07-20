@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 20 Jul 2026 07:12:00 -0400
+Subject: [PATCH] p2: pin posix constdef comparator
+
+posix module initialization sorts its exported configuration-name tables with
+qsort.  The comparator callback currently occupies a standalone overlay, so
+each qsort callback can reload code for a two-field strcmp.
+
+The exact r12 linked layout records a 0x30-byte cmp_constdefs overlay body and
+a 0x4-byte resident entry stub.  That image has 436 bytes of raw staging
+headroom.  Moving the 48-byte body resident and removing the four-byte stub
+therefore adds exactly 44 bytes and leaves 392 bytes.  Mark only this callback
+resident; the placement macro is empty away from NuttX P2, preserving generic
+CPython code generation and behavior.
+---
+ Modules/posixmodule.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Modules/posixmodule.c b/Modules/posixmodule.c
+--- a/Modules/posixmodule.c
++++ b/Modules/posixmodule.c
+@@ -14546,6 +14546,7 @@ os_sysconf_impl(PyObject *module, int name)
+  * easier to add additional entries to the tables.
+  */
+ 
++_Py_P2_HUB_RESIDENT
+ static int
+ cmp_constdefs(const void *v1,  const void *v2)
+ {
+-- 
+2.50.1

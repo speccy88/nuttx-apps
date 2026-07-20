@@ -28,6 +28,9 @@ CPYTHON_VERSION_MINOR=$(basename $(CPYTHON_VERSION))
 CPYTHON_ZIP = v$(CPYTHON_VERSION).zip
 
 CPYTHON_UNPACKNAME = Python
+CPYTHON_PATCHES = $(wildcard patch$(DELIM)*.patch)
+CPYTHON_PATCH_VARIANT = $(if $(filter y,$(CONFIG_ARCH_P2)),p2,generic)
+CPYTHON_PATCH_STAMP = $(CPYTHON_UNPACKNAME)$(DELIM).nuttx-patched-$(CPYTHON_PATCH_VARIANT)
 UNPACK ?= unzip -q -o
 
 MACHDEP=nuttx
@@ -51,6 +54,7 @@ P2_CONFIGURE_CC=$(CC)
 P2_CONFIGURE_CXX=$(CXX)
 
 ifeq ($(CONFIG_ARCH_P2),y)
+P2_CPYTHON_REGEN_ENV=NUTTX_P2_FREEZE_STARTUP_ENCODINGS=1
 P2_CONFIGURE_LINK_STAMP=$(P2_CONFIGURE_LINKDIR)/.prepared
 P2_CONFIGURE_LIBC=$(P2_CONFIGURE_LINKDIR)/libc.a
 P2_CONFIGURE_LIBP2=$(P2_CONFIGURE_LINKDIR)/libp2.a
@@ -68,7 +72,10 @@ P2_OVERLAY_SLOT_ADDRESS=$(shell printf '0x%x' \
 	$$((0x7c000 - $(CONFIG_P2_HUB_OVERLAY_SLOT_SIZE))))
 P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlays
 P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlays-all
-P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlay-auto-groups=$(CONFIG_P2_HUB_OVERLAY_GROUP_COUNT)
+P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlay-link-assigned
+P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlay-source-root=$(abspath $(CPYTHON_PATH))
+P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlay-source-namespace=cpython
+P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlay-source-variant=$(CPYTHON_VERSION)-nuttx-p2
 P2_CPYTHON_CFLAGS += -mllvm -p2-hub-overlay-slot-address=$(P2_OVERLAY_SLOT_ADDRESS)
 P2_CPYTHON_CFLAGS += -mllvm -p2-externalize-data
 endif
@@ -93,7 +100,7 @@ $(CPYTHON_ZIP):
 	@echo "Downloading: $(CPYTHON_URL)/$(CPYTHON_ZIP)"
 	$(Q) $(call DOWNLOAD,$(CPYTHON_URL),$(CPYTHON_ZIP))
 
-$(CPYTHON_UNPACKNAME): $(CPYTHON_ZIP)
+$(CPYTHON_PATCH_STAMP): $(CPYTHON_ZIP) $(CPYTHON_PATCHES)
 	@echo "Unpacking: $(CPYTHON_ZIP) -> $(CPYTHON_UNPACKNAME)"
 	$(Q) $(call DELDIR,$(CPYTHON_UNPACKNAME))
 	$(Q) $(UNPACK) $(CPYTHON_ZIP)
@@ -121,8 +128,45 @@ $(CPYTHON_UNPACKNAME): $(CPYTHON_ZIP)
 	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0020-ctypes-skip-pythonapi-on-nuttx.patch
 	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0021-posixmodule-ignore-utime-enosys-on-nuttx.patch
 	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0022-p2-use-dedicated-tss-for-current-thread-state.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0023-p2-co-locate-cpython-startup-overlays.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0024-p2-collapse-cpython-startup-transitions.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0025-p2-co-locate-type-initialization-overlay.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0026-p2-co-locate-type-initialization-success-path.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0027-p2-trace-gil-and-static-type-initialization.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0028-p2-avoid-eager-type-cache-psram-writes.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0029-p2-co-locate-unicode-static-interning.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0030-fix-static-unicode-intern-failure.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0031-p2-use-integer-hashtable-load-factors.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0032-p2-co-locate-unicode-deallocation-with-type-init.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0033-p2-co-locate-dictionary-hot-paths-with-type-init.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0034-p2-co-locate-module-attribute-startup-loop.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0035-p2-co-locate-gc-traversal-working-set.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0036-p2-co-locate-frozen-code-bootstrap-loops.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0037-p2-co-locate-cyclic-gc-collector-core.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0038-p2-keep-code-name-interning-with-type-init.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0039-p2-trace-importlib-bootstrap-steps.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0040-allow-importlib-without-thread-module.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0041-add-lock-only-thread-compatibility.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0042-p2-co-locate-importlib-startup-hot-paths.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0043-p2-trace-main-interpreter-initialization.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0044-p2-trace-fill-time-softfloat-boundaries.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0045-p2-add-default-no-site-config-hook.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0046-p2-add-fixed-path-config-fast-path.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0047-p2-inline-static-unicode-compare-hot-edge.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0048-p2-inline-exact-tuple-iterator-hot-edge.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0049-p2-trace-main-interpreter-subphases.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0050-p2-inline-marshal-reference-list-append.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0051-p2-use-utf8-decoder-for-marshal-ascii.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0052-p2-pin-posix-constdef-comparator.patch
+ifeq ($(CONFIG_ARCH_P2),y)
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0053-p2-freeze-startup-encodings.patch
+	$(Q) patch -p1 -d $(CPYTHON_UNPACKNAME) < patch$(DELIM)0054-p2-record-frozen-encoding-pcbuild.patch
+endif
+	$(Q) touch $@
 
-$(HOSTPYTHON):
+$(CPYTHON_UNPACKNAME): $(CPYTHON_PATCH_STAMP)
+
+$(HOSTPYTHON): $(CPYTHON_PATCH_STAMP)
 	mkdir -p $(HOSTBUILD)
 	mkdir -p $(HOSTINSTALL)
 	$(Q) ( \
@@ -213,6 +257,7 @@ endif
 # runtime with target-native paths so sys.prefix, getpath, and packaged
 # _sysconfigdata never contain a host worktree pathname.
 $(TARGETBUILD)/Makefile: $(HOSTPYTHON) $(CONFIG_SITE) $(SETUP_LOCAL) \
+			 $(CPYTHON_PATCH_STAMP) \
 			 $(CURDIR)$(DELIM)Makefile $(P2_CONFIGURE_DEPS) \
 			 $(P2_CONFIGURE_LINK_STAMP)
 	$(Q) mkdir -p $(TARGETBUILD)/Modules
@@ -300,7 +345,7 @@ ifeq ($(CONFIG_INTERPRETERS_CPYTHON_INSTALL_NUTTX_PACKAGE),y)
 		$(HOSTPYTHON) $(CURDIR)/repack_wheel_add_pyc.py --package nuttx_periphery "$${NUTTX_WHEEL}"; \
 	)
 endif
-	$(MAKE) -C $(TARGETBUILD) \
+	$(Q) $(P2_CPYTHON_REGEN_ENV) $(MAKE) -C $(TARGETBUILD) \
 		EXTRA_CFLAGS="$(P2_CPYTHON_CFLAGS)" regen-frozen
 	$(MAKE) -C $(TARGETBUILD) \
 		EXTRA_CFLAGS="$(P2_CPYTHON_CFLAGS)" \
@@ -360,7 +405,7 @@ else
 depend:: romfs_cpython_modules.img
 endif
 
-context:: $(CPYTHON_UNPACKNAME)
+context:: $(CPYTHON_PATCH_STAMP)
 
 distclean::
 	$(call DELDIR, $(BUILDIR))

@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
 #include <sys/boardctl.h>
 #include <sys/mount.h>
@@ -37,6 +38,8 @@ static int g_image_calls;
 static int g_register_calls;
 static int g_mount_calls;
 static int g_early_init_calls;
+static int g_no_site_calls;
+static int g_fixed_path_calls;
 static int g_python_calls;
 
 /****************************************************************************
@@ -99,11 +102,24 @@ void _pyruntime_early_init(void)
   g_early_init_calls++;
 }
 
+void py_p2_set_default_no_site(void)
+{
+  g_no_site_calls++;
+}
+
+void py_p2_set_fixed_path_config(const wchar_t *writable_path)
+{
+  assert(wcscmp(writable_path, L"/tmp") == 0);
+  g_fixed_path_calls++;
+}
+
 int py_bytesmain(int argc, char *argv[])
 {
   assert(argc == 3);
   assert(strcmp(argv[0], "python") == 0);
   assert(strcmp(argv[2], "pass") == 0);
+  assert(g_no_site_calls == g_python_calls + 1);
+  assert(g_fixed_path_calls == g_python_calls + 1);
   g_python_calls++;
   return 10 + g_python_calls;
 }
@@ -127,6 +143,8 @@ int main(void)
   assert(g_register_calls == 1);
   assert(g_mount_calls == 1);
   assert(g_early_init_calls == 0);
+  assert(g_no_site_calls == 0);
+  assert(g_fixed_path_calls == 0);
   assert(g_python_calls == 0);
 
   /* Retry the failed stage without duplicate device registration. */
@@ -139,6 +157,8 @@ int main(void)
   assert(g_register_calls == 1);
   assert(g_mount_calls == 2);
   assert(g_early_init_calls == 1);
+  assert(g_no_site_calls == 1);
+  assert(g_fixed_path_calls == 1);
   assert(g_python_calls == 1);
 
   /* A mounted ROMFS persists and needs no procfs lookup or mount call. */
@@ -151,6 +171,8 @@ int main(void)
   assert(g_register_calls == 1);
   assert(g_mount_calls == 2);
   assert(g_early_init_calls == 2);
+  assert(g_no_site_calls == 2);
+  assert(g_fixed_path_calls == 2);
   assert(g_python_calls == 2);
 
   puts("PASS: persistent CPython ROMFS mount state");

@@ -1,0 +1,43 @@
+From 2e133355b7ae314b98f398768ad956fc82acb0b6 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 21:15:00 -0400
+Subject: [PATCH] importlib: allow builds without the thread module
+
+Importlib retains _DummyModuleLock specifically for Python builds without
+multi-threading support, and _get_module_lock() already selects it while the
+injected _thread global remains None.  However, _setup() unconditionally
+imports _thread before that fallback can be used.  A build which deliberately
+omits the module therefore fails during _PyImport_InitCore.
+
+Skip only a genuinely absent _thread builtin.  Do not catch import failures
+from a present module, and continue to require _warnings and _weakref.  Normal
+threaded builds take the unchanged load path.
+---
+ Lib/importlib/_bootstrap.py | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/Lib/importlib/_bootstrap.py b/Lib/importlib/_bootstrap.py
+--- a/Lib/importlib/_bootstrap.py
++++ b/Lib/importlib/_bootstrap.py
+@@ -438,6 +438,7 @@ def _get_module_lock(name):
+ 
+         if lock is None:
+             if _thread is None:
++                # _setup leaves an absent _thread as None on threadless builds.
+                 lock = _DummyModuleLock(name)
+             else:
+                 lock = _ModuleLock(name)
+@@ -1526,6 +1526,11 @@ def _setup(sys_module, _imp_module):
+     self_module = sys.modules[__name__]
+     for builtin_name in ('_thread', '_warnings', '_weakref'):
++        # A path module preloaded under this name must not turn importlib's
++        # internal thread support on when the native builtin is absent.
++        if (builtin_name == '_thread' and
++                BuiltinImporter.find_spec(builtin_name) is None):
++            continue
+         if builtin_name not in sys.modules:
+             builtin_module = _builtin_from_name(builtin_name)
+         else:
+             builtin_module = sys.modules[builtin_name]
+-- 
+2.50.1

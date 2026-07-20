@@ -1,0 +1,435 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 18 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: co-locate type initialization closure
+
+HIL startup telemetry shows the static-type loop alternating between the
+large lifecycle caller and typeobject helpers for every builtin type.  Move
+the lifecycle translation unit and the measured surviving type-ready
+closure into explicit overlay group 7 so the loop stays in one Hub image.
+
+Keep the current-thread-state, decref deallocator, and error-query leaves in
+Hub.  Their measured linked net cost is 224 bytes, within the 292-byte raw
+image margin before this change, and prevents group 7 from being evicted for
+these startup-hot services.  The attributes are P2-only and remain empty on
+all other targets.
+---
+
+diff --git a/Include/internal/pycore_pystate.h b/Include/internal/pycore_pystate.h
+index a26ad69..213f112 100644
+--- a/Include/internal/pycore_pystate.h
++++ b/Include/internal/pycore_pystate.h
+@@ -124,7 +124,8 @@ int _PyThreadState_MustExit(PyThreadState *tstate) _Py_P2_HUB_RESIDENT;
+ 
+ // Export for most shared extensions, used via _PyThreadState_GET() static
+ // inline function.
+-PyAPI_FUNC(PyThreadState *) _PyThreadState_GetCurrent(void);
++PyAPI_FUNC(PyThreadState *) _PyThreadState_GetCurrent(void)
++    _Py_P2_HUB_RESIDENT;
+ 
+ /* Get the current Python thread state.
+ 
+diff --git a/Include/internal/pycore_typeobject.h b/Include/internal/pycore_typeobject.h
+index 05f125f..e46cbd8 100644
+--- a/Include/internal/pycore_typeobject.h
++++ b/Include/internal/pycore_typeobject.h
+@@ -132,7 +132,8 @@ struct types_state {
+ 
+ /* runtime lifecycle */
+ 
+-extern PyStatus _PyTypes_InitTypes(PyInterpreterState *);
++extern PyStatus _PyTypes_InitTypes(PyInterpreterState *)
++    _Py_P2_INIT_OVERLAY;
+ extern void _PyTypes_FiniTypes(PyInterpreterState *);
+ extern void _PyTypes_FiniExtTypes(PyInterpreterState *interp);
+ extern void _PyTypes_Fini(PyInterpreterState *);
+@@ -158,7 +159,7 @@ _PyStaticType_GET_WEAKREFS_LISTPTR(managed_static_type_state *state)
+ 
+ extern int _PyStaticType_InitBuiltin(
+     PyInterpreterState *interp,
+-    PyTypeObject *type);
++    PyTypeObject *type) _Py_P2_INIT_OVERLAY;
+ extern void _PyStaticType_FiniBuiltin(
+     PyInterpreterState *interp,
+     PyTypeObject *type);
+@@ -192,7 +193,8 @@ _PyType_GetModuleState(PyTypeObject *type)
+ 
+ // Export for 'math' shared extension, used via _PyType_IsReady() static inline
+ // function
+-PyAPI_FUNC(PyObject *) _PyType_GetDict(PyTypeObject *);
++PyAPI_FUNC(PyObject *) _PyType_GetDict(PyTypeObject *)
++    _Py_P2_INIT_OVERLAY;
+ 
+ extern PyObject * _PyType_GetBases(PyTypeObject *type);
+ extern PyObject * _PyType_GetMRO(PyTypeObject *type);
+diff --git a/Include/object.h b/Include/object.h
+index 78aa7ad..1d28ec0 100644
+--- a/Include/object.h
++++ b/Include/object.h
+@@ -551,7 +551,7 @@ PyAPI_DATA(PyTypeObject) PySuper_Type; /* built-in 'super' */
+ 
+ PyAPI_FUNC(unsigned long) PyType_GetFlags(PyTypeObject*);
+ 
+-PyAPI_FUNC(int) PyType_Ready(PyTypeObject *);
++PyAPI_FUNC(int) PyType_Ready(PyTypeObject *) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyType_GenericAlloc(PyTypeObject *, Py_ssize_t);
+ PyAPI_FUNC(PyObject *) PyType_GenericNew(PyTypeObject *,
+                                                PyObject *, PyObject *);
+@@ -777,7 +777,7 @@ PyAPI_FUNC(void) _Py_INCREF_IncRefTotal(void);
+ PyAPI_FUNC(void) _Py_DECREF_DecRefTotal(void);
+ #endif  // Py_REF_DEBUG && !Py_LIMITED_API
+ 
+-PyAPI_FUNC(void) _Py_Dealloc(PyObject *);
++PyAPI_FUNC(void) _Py_Dealloc(PyObject *) _Py_P2_HUB_RESIDENT;
+ 
+ /*
+ These are provided as conveniences to Python runtime embedders, so that
+diff --git a/Include/pyerrors.h b/Include/pyerrors.h
+index 8ad39bc..b95e36c 100644
+--- a/Include/pyerrors.h
++++ b/Include/pyerrors.h
+@@ -12,7 +12,7 @@ PyAPI_FUNC(void) PyErr_SetString(
+     PyObject *exception,
+     const char *string   /* decoded from utf-8 */
+     );
+-PyAPI_FUNC(PyObject *) PyErr_Occurred(void);
++PyAPI_FUNC(PyObject *) PyErr_Occurred(void) _Py_P2_HUB_RESIDENT;
+ PyAPI_FUNC(void) PyErr_Clear(void);
+ PyAPI_FUNC(void) PyErr_Fetch(PyObject **, PyObject **, PyObject **);
+ PyAPI_FUNC(void) PyErr_Restore(PyObject *, PyObject *, PyObject *);
+diff --git a/Include/pyport.h b/Include/pyport.h
+index da913d9..16ad4b6 100644
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -3,9 +3,11 @@
+ 
+ #if defined(__NuttX__) && defined(__propeller2__)
+ #  define _Py_P2_HUB_RESIDENT __attribute__((p2_hub_resident))
++#  define _Py_P2_INIT_OVERLAY __attribute__((p2_hub_overlay(7)))
+ #  define _Py_P2_UTF8_OVERLAY __attribute__((p2_hub_overlay(6)))
+ #else
+ #  define _Py_P2_HUB_RESIDENT
++#  define _Py_P2_INIT_OVERLAY
+ #  define _Py_P2_UTF8_OVERLAY
+ #endif
+ 
+diff --git a/Objects/object.c b/Objects/object.c
+index cbf576d..52facba 100644
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -2337,7 +2337,7 @@ static PyTypeObject* static_types[] = {
+ };
+ 
+ 
+-PyStatus
++_Py_P2_INIT_OVERLAY PyStatus
+ _PyTypes_InitTypes(PyInterpreterState *interp)
+ {
+     // All other static types (unless initialized elsewhere)
+@@ -2851,7 +2851,7 @@ _PyObject_AssertFailed(PyObject *obj, const char *expr, const char *msg,
+ }
+ 
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ _Py_Dealloc(PyObject *op)
+ {
+     PyTypeObject *type = Py_TYPE(op);
+diff --git a/Objects/typeobject.c b/Objects/typeobject.c
+index b1f7137..ff90188 100644
+--- a/Objects/typeobject.c
++++ b/Objects/typeobject.c
+@@ -98,7 +98,7 @@ releasebuffer_call_python(PyObject *self, Py_buffer *buffer);
+ static PyObject *
+ slot_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds);
+ 
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ lookup_maybe_method(PyObject *self, PyObject *attr, int *unbound);
+ 
+ static int
+@@ -269,7 +269,7 @@ managed_static_type_state_init(PyInterpreterState *interp, PyTypeObject *self,
+ 
+ /* Reset the type's per-interpreter state.
+    This basically undoes what managed_static_type_state_init() did. */
+-static void
++_Py_P2_INIT_OVERLAY static void
+ managed_static_type_state_clear(PyInterpreterState *interp, PyTypeObject *self,
+                                 int isbuiltin, int final)
+ {
+@@ -334,7 +334,7 @@ start_readying(PyTypeObject *type)
+     type->tp_flags |= Py_TPFLAGS_READYING;
+ }
+ 
+-static inline void
++_Py_P2_INIT_OVERLAY static inline void
+ stop_readying(PyTypeObject *type)
+ {
+     if (type->tp_flags & _Py_TPFLAGS_STATIC_BUILTIN) {
+@@ -376,7 +376,7 @@ lookup_tp_dict(PyTypeObject *self)
+     return self->tp_dict;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ _PyType_GetDict(PyTypeObject *self)
+ {
+     /* It returns a borrowed reference. */
+@@ -650,7 +650,7 @@ _PyType_GetSubclasses(PyTypeObject *self)
+  * doesn't guarantee that the signature is valid, only that it
+  * has a valid prefix.  (the signature must also pass skip_signature.)
+  */
+-static const char *
++_Py_P2_INIT_OVERLAY static const char *
+ find_signature(const char *name, const char *doc)
+ {
+     const char *dot;
+@@ -681,7 +681,7 @@ find_signature(const char *name, const char *doc)
+  * skips past the end of the docstring's introspection signature.
+  * (assumes doc starts with a valid signature prefix.)
+  */
+-static const char *
++_Py_P2_INIT_OVERLAY static const char *
+ skip_signature(const char *doc)
+ {
+     while (*doc) {
+@@ -729,7 +729,7 @@ _PyType_CheckConsistency(PyTypeObject *type)
+ #undef CHECK
+ }
+ 
+-static const char *
++_Py_P2_INIT_OVERLAY static const char *
+ _PyType_DocWithoutSignature(const char *name, const char *internal_doc)
+ {
+     const char *doc = find_signature(name, internal_doc);
+@@ -978,7 +978,7 @@ set_version_unlocked(PyTypeObject *tp, unsigned int version)
+     FT_ATOMIC_STORE_UINT32_RELAXED(tp->tp_version_tag, version);
+ }
+ 
+-static void
++_Py_P2_INIT_OVERLAY static void
+ type_modified_unlocked(PyTypeObject *type)
+ {
+     /* Invalidate any cached data for the specified type and all
+@@ -1059,10 +1059,10 @@ PyType_Modified(PyTypeObject *type)
+     END_TYPE_LOCK();
+ }
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ is_subtype_with_mro(PyObject *a_mro, PyTypeObject *a, PyTypeObject *b);
+ 
+-static void
++_Py_P2_INIT_OVERLAY static void
+ type_mro_modified(PyTypeObject *type, PyObject *bases) {
+     /*
+        Check that all base classes or elements of the MRO of type are
+@@ -1482,7 +1482,7 @@ static PyTypeObject *best_base(PyObject *);
+ static int mro_internal(PyTypeObject *, PyObject **);
+ static int type_is_subtype_base_chain(PyTypeObject *, PyTypeObject *);
+ static int compatible_for_assignment(PyTypeObject *, PyTypeObject *, const char *);
+-static int add_subclass(PyTypeObject*, PyTypeObject*);
++_Py_P2_INIT_OVERLAY static int add_subclass(PyTypeObject*, PyTypeObject*);
+ static int add_all_subclasses(PyTypeObject *type, PyObject *bases);
+ static void remove_subclass(PyTypeObject *, PyTypeObject *);
+ static void remove_all_subclasses(PyTypeObject *type, PyObject *bases);
+@@ -2432,7 +2432,7 @@ subtype_dealloc(PyObject *self)
+     */
+ }
+ 
+-static PyTypeObject *solid_base(PyTypeObject *type);
++_Py_P2_INIT_OVERLAY static PyTypeObject *solid_base(PyTypeObject *type);
+ 
+ /* type test with subclassing support */
+ 
+@@ -2448,7 +2448,7 @@ type_is_subtype_base_chain(PyTypeObject *a, PyTypeObject *b)
+     return (b == &PyBaseObject_Type);
+ }
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ is_subtype_with_mro(PyObject *a_mro, PyTypeObject *a, PyTypeObject *b)
+ {
+     int res;
+@@ -2518,7 +2518,7 @@ _PyObject_LookupSpecialId(PyObject *self, _Py_Identifier *attrid)
+     return _PyObject_LookupSpecial(self, attr);
+ }
+ 
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ lookup_maybe_method(PyObject *self, PyObject *attr, int *unbound)
+ {
+     PyObject *res = _PyType_LookupRef(Py_TYPE(self), attr);
+@@ -2540,7 +2540,7 @@ lookup_maybe_method(PyObject *self, PyObject *attr, int *unbound)
+     return res;
+ }
+ 
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ lookup_method(PyObject *self, PyObject *attr, int *unbound)
+ {
+     PyObject *res = lookup_maybe_method(self, attr, unbound);
+@@ -2661,7 +2661,7 @@ tail_contains(PyObject *tuple, int whence, PyObject *o)
+     return 0;
+ }
+ 
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ class_name(PyObject *cls)
+ {
+     PyObject *name;
+@@ -2832,7 +2832,7 @@ pmerge(PyObject *acc, PyObject **to_merge, Py_ssize_t to_merge_size)
+     return res;
+ }
+ 
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ mro_implementation_unlocked(PyTypeObject *type)
+ {
+     ASSERT_TYPE_LOCK_HELD();
+@@ -3056,7 +3056,7 @@ mro_invoke(PyTypeObject *type)
+ 
+      - Returns -1 in case of an error.
+ */
+-static int
++_Py_P2_INIT_OVERLAY static int
+ mro_internal_unlocked(PyTypeObject *type, int initial, PyObject **p_old_mro)
+ {
+     ASSERT_TYPE_LOCK_HELD();
+@@ -3182,7 +3182,7 @@ shape_differs(PyTypeObject *t1, PyTypeObject *t2)
+     );
+ }
+ 
+-static PyTypeObject *
++_Py_P2_INIT_OVERLAY static PyTypeObject *
+ solid_base(PyTypeObject *type)
+ {
+     PyTypeObject *base;
+@@ -8109,7 +8109,7 @@ type_ready_set_new(PyTypeObject *type, int initial)
+     return 0;
+ }
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ type_ready_managed_dict(PyTypeObject *type)
+ {
+     if (!(type->tp_flags & Py_TPFLAGS_MANAGED_DICT)) {
+@@ -8136,7 +8136,7 @@ type_ready_managed_dict(PyTypeObject *type)
+     return 0;
+ }
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ type_ready_post_checks(PyTypeObject *type)
+ {
+     // bpo-44263: tp_traverse is required if Py_TPFLAGS_HAVE_GC is set.
+@@ -8170,7 +8170,7 @@ type_ready_post_checks(PyTypeObject *type)
+ }
+ 
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ type_ready(PyTypeObject *type, int initial)
+ {
+     ASSERT_TYPE_LOCK_HELD();
+@@ -8248,7 +8248,7 @@ error:
+     return -1;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyType_Ready(PyTypeObject *type)
+ {
+     if (type->tp_flags & Py_TPFLAGS_READY) {
+@@ -8277,7 +8277,7 @@ PyType_Ready(PyTypeObject *type)
+ }
+ 
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ init_static_type(PyInterpreterState *interp, PyTypeObject *self,
+                  int isbuiltin, int initial)
+ {
+@@ -8320,14 +8320,14 @@ _PyStaticType_InitForExtension(PyInterpreterState *interp, PyTypeObject *self)
+     return init_static_type(interp, self, 0, ((self->tp_flags & Py_TPFLAGS_READY) == 0));
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyStaticType_InitBuiltin(PyInterpreterState *interp, PyTypeObject *self)
+ {
+     return init_static_type(interp, self, 1, _Py_IsMainInterpreter(interp));
+ }
+ 
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ add_subclass(PyTypeObject *base, PyTypeObject *type)
+ {
+     PyObject *key = PyLong_FromVoidPtr((void *) type);
+@@ -10399,7 +10399,7 @@ static pytype_slotdef slotdefs[] = {
+    the offset to the type pointer, since it takes care to indirect through the
+    proper indirection pointer (as_buffer, etc.); it returns NULL if the
+    indirection pointer is NULL. */
+-static void **
++_Py_P2_INIT_OVERLAY static void **
+ slotptr(PyTypeObject *type, int ioffset)
+ {
+     char *ptr;
+diff --git a/Python/errors.c b/Python/errors.c
+index 433253b..5ac028b 100644
+--- a/Python/errors.c
++++ b/Python/errors.c
+@@ -300,7 +300,7 @@ PyErr_SetString(PyObject *exception, const char *string)
+ }
+ 
+ 
+-PyObject* _Py_HOT_FUNCTION
++_Py_P2_HUB_RESIDENT PyObject* _Py_HOT_FUNCTION
+ PyErr_Occurred(void)
+ {
+     /* The caller must hold the GIL. */
+diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
+index 004c78e..a233d42 100644
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -43,7 +43,7 @@
+ #endif
+ 
+ #if defined(__NuttX__) && defined(__propeller2__)
+-#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(7))), \
+                                apply_to = function)
+ #endif
+ 
+diff --git a/Python/pystate.c b/Python/pystate.c
+index 9070659..3094260 100644
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -132,12 +132,21 @@ current_fast_clear(_PyRuntimeState *runtime)
+         _Py_FatalErrorFormat(__func__, "tstate %p is still current", tstate); \
+     }
+ 
+-PyThreadState *
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute pop
++#endif
++
++_Py_P2_HUB_RESIDENT PyThreadState *
+ _PyThreadState_GetCurrent(void)
+ {
+     return current_fast_get();
+ }
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
++                               apply_to = function)
++#endif
++
+ 
+ //------------------------------------------------
+ // the thread state bound to the current OS thread
+
+-- 
+2.50.0
+

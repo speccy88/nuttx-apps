@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: co-locate Unicode deallocation with type init
+
+HIL telemetry reached the 113-entry static-type loop but spent most of its
+time alternating between type-initialization overlay group 7 and Unicode
+overlay group 0xc6.  Stub 0x448 is unicode_dealloc(): descriptor creation
+interns many names that already exist, and intern_common() decrefs each
+discarded temporary through the indirect tp_dealloc slot.  The indirect
+type-slot edge was not visible in the direct successful-path closure.
+
+Move unicode_dealloc() into group 7 so this common decref stays in the
+already-loaded image.  Keep _PyUnicode_ExactDealloc() with its sole callee;
+otherwise specialized bytecode deallocation would acquire a new nested
+0xc6-to-7 transition.  The two linked bodies total 516 bytes, while the
+measured group-7 image has 19,868 bytes of slot headroom.  Attributes are
+P2-only through _Py_P2_INIT_OVERLAY and do not change other targets.
+---
+ Include/internal/pycore_unicodeobject.h | 3 ++-
+ Objects/unicodeobject.c                 | 4 ++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/Include/internal/pycore_unicodeobject.h b/Include/internal/pycore_unicodeobject.h
+--- a/Include/internal/pycore_unicodeobject.h
++++ b/Include/internal/pycore_unicodeobject.h
+@@ -32,7 +32,8 @@ PyAPI_FUNC(int) _PyUnicode_CheckConsistency(
+     PyObject *op,
+     int check_content);
+ 
+-PyAPI_FUNC(void) _PyUnicode_ExactDealloc(PyObject *op);
++PyAPI_FUNC(void) _PyUnicode_ExactDealloc(PyObject *op)
++    _Py_P2_INIT_OVERLAY;
+ extern Py_ssize_t _PyUnicode_InternedSize(void);
+ extern Py_ssize_t _PyUnicode_InternedSize_Immortal(void);
+ 
+diff --git a/Objects/unicodeobject.c b/Objects/unicodeobject.c
+--- a/Objects/unicodeobject.c
++++ b/Objects/unicodeobject.c
+@@ -1692,7 +1692,7 @@ find_maxchar_surrogates(const wchar_t *begin, const wchar_t *end,
+     return 0;
+ }
+ 
+-static void
++_Py_P2_INIT_OVERLAY static void
+ unicode_dealloc(PyObject *unicode)
+ {
+ #ifdef Py_DEBUG
+@@ -14942,7 +14942,7 @@ onError:
+     return NULL;
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _PyUnicode_ExactDealloc(PyObject *op)
+ {
+     assert(PyUnicode_CheckExact(op));
+-- 
+2.50.1
+

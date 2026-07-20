@@ -87,6 +87,21 @@ int board_cpython_romdisk_register(int minor, FAR const uint8_t *image,
                                    uint32_t nsectors, uint16_t sectsize);
 #endif
 
+#ifdef CONFIG_INTERPRETERS_CPYTHON_P2_OVERLAY_TELEMETRY
+void python_overlay_telemetry_start(void);
+void python_overlay_report(FAR const char *stage);
+#endif
+
+#ifdef CONFIG_INTERPRETERS_CPYTHON_P2_DEFAULT_NO_SITE
+void py_p2_set_default_no_site(void);
+#endif
+
+#ifdef CONFIG_INTERPRETERS_CPYTHON_P2_FIXED_PATH_CONFIG
+#  define CPYTHON_WIDEN_LITERAL_(literal) L##literal
+#  define CPYTHON_WIDEN_LITERAL(literal) CPYTHON_WIDEN_LITERAL_(literal)
+void py_p2_set_fixed_path_config(FAR const wchar_t *writable_path);
+#endif
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -268,5 +283,20 @@ int python_worker_main(int argc, FAR char *argv[])
 #ifdef CONFIG_ARCH_P2
   printf("P2PY:CPYTHON:RUN\n");
 #endif
-  return py_bytesmain(argc, argv);
+#ifdef CONFIG_INTERPRETERS_CPYTHON_P2_OVERLAY_TELEMETRY
+  python_overlay_telemetry_start();
+  python_overlay_report("BEGIN");
+#endif
+#ifdef CONFIG_INTERPRETERS_CPYTHON_P2_DEFAULT_NO_SITE
+  py_p2_set_default_no_site();
+#endif
+#ifdef CONFIG_INTERPRETERS_CPYTHON_P2_FIXED_PATH_CONFIG
+  py_p2_set_fixed_path_config(
+    CPYTHON_WIDEN_LITERAL(CONFIG_INTERPRETERS_CPYTHON_PYTHONPATH));
+#endif
+  ret = py_bytesmain(argc, argv);
+#ifdef CONFIG_INTERPRETERS_CPYTHON_P2_OVERLAY_TELEMETRY
+  python_overlay_report("END");
+#endif
+  return ret;
 }

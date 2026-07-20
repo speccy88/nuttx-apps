@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 20 Jul 2026 05:10:00 -0400
+Subject: [PATCH] p2: inline exact tuple iterator hot edge
+
+Bound hardware HOT telemetry recorded 405 calls from group 177's
+PyIter_Next to group 65's tupleiter_next before importlib startup.  The
+bounded heavy-hitter error leaves at least 290 certain transitions.  Copying
+the 11,580-byte target group and reloading the 32,632-byte caller group costs
+at least 12,821,480 overlay bytes on that path.
+
+Special-case the exact built-in tuple iterator in PyIter_Next on P2.  Factor
+the existing tuple iterator operation into a P2-only always-inline helper so
+the dispatch fast path and the type slot retain one source implementation.
+All other iterator types keep the generic tp_iternext dispatch, and the
+existing PyIter_Next NULL/StopIteration handling remains common to both
+paths.  Keep tupleiter_next as the type slot for direct callers and avoid
+pinning either function to an automatically assigned overlay group number.
+---
+ Include/internal/pycore_tuple.h | 26 ++++++++++++++++++++++++++
+ Objects/abstract.c              | 11 ++++++++++-
+ Objects/tupleobject.c           |  4 ++++
+ 3 files changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/Include/internal/pycore_tuple.h b/Include/internal/pycore_tuple.h
+index 14a9e42..a67d552 100644
+--- a/Include/internal/pycore_tuple.h
++++ b/Include/internal/pycore_tuple.h
+@@ -29,6 +29,32 @@ typedef struct {
+     PyTupleObject *it_seq; /* Set to NULL when iterator is exhausted */
+ } _PyTupleIterObject;
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++static inline Py_ALWAYS_INLINE PyObject *
++_PyP2_TupleIterNextInline(_PyTupleIterObject *it)
++{
++    PyTupleObject *seq;
++    PyObject *item;
++
++    assert(it != NULL);
++    seq = it->it_seq;
++    if (seq == NULL) {
++        return NULL;
++    }
++    assert(PyTuple_Check(seq));
++
++    if (it->it_index < PyTuple_GET_SIZE(seq)) {
++        item = PyTuple_GET_ITEM(seq, it->it_index);
++        ++it->it_index;
++        return Py_NewRef(item);
++    }
++
++    it->it_seq = NULL;
++    Py_DECREF(seq);
++    return NULL;
++}
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Objects/abstract.c b/Objects/abstract.c
+index 8357175..80fe982 100644
+--- a/Objects/abstract.c
++++ b/Objects/abstract.c
+@@ -10,6 +10,7 @@
+ #include "pycore_long.h"          // _Py_IsNegative
+ #include "pycore_pyerrors.h"      // _PyErr_Occurred()
+ #include "pycore_pystate.h"       // _PyThreadState_GET()
++#include "pycore_tuple.h"         // _PyTupleIterObject
+ #include "pycore_unionobject.h"   // _PyUnion_Check()
+ 
+ #include <stddef.h>               // offsetof()
+@@ -2916,7 +2917,15 @@ PyObject *
+ PyIter_Next(PyObject *iter)
+ {
+     PyObject *result;
+-    result = (*Py_TYPE(iter)->tp_iternext)(iter);
++#if defined(__NuttX__) && defined(__propeller2__)
++    if (Py_IS_TYPE(iter, &PyTupleIter_Type)) {
++        result = _PyP2_TupleIterNextInline((_PyTupleIterObject *)iter);
++    }
++    else
++#endif
++    {
++        result = (*Py_TYPE(iter)->tp_iternext)(iter);
++    }
+     if (result == NULL) {
+         PyThreadState *tstate = _PyThreadState_GET();
+         if (_PyErr_Occurred(tstate)
+diff --git a/Objects/tupleobject.c b/Objects/tupleobject.c
+index 1447ad6..64b5694 100644
+--- a/Objects/tupleobject.c
++++ b/Objects/tupleobject.c
+@@ -992,6 +992,9 @@ tupleiter_traverse(_PyTupleIterObject *it, visitproc visit, void *arg)
+ static PyObject *
+ tupleiter_next(_PyTupleIterObject *it)
+ {
++#if defined(__NuttX__) && defined(__propeller2__)
++    return _PyP2_TupleIterNextInline(it);
++#else
+     PyTupleObject *seq;
+     PyObject *item;
+ 
+@@ -1010,6 +1013,7 @@ tupleiter_next(_PyTupleIterObject *it)
+     it->it_seq = NULL;
+     Py_DECREF(seq);
+     return NULL;
++#endif
+ }
+ 
+ static PyObject *
+-- 
+2.50.1

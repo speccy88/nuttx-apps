@@ -39,6 +39,50 @@ config INTERPRETERS_CPYTHON_LAUNCHER_STACKSIZE
 		waits for it.  The interpreter itself uses
 		INTERPRETERS_CPYTHON_STACKSIZE.
 
+config INTERPRETERS_CPYTHON_P2_OVERLAY_TELEMETRY
+	bool "Report P2 CPython overlay progress"
+	default n
+	depends on ARCH_P2 && P2_HUB_OVERLAYS
+	---help---
+		Keep the small command task awake while its CPython worker runs and
+		periodically report coherent resident overlay counters.  This does not
+		enter overlay code and is safe while the worker owns the single Hub
+		execution slot.  It is intended for target qualification and diagnosing
+		an apparent interpreter stall.
+
+config INTERPRETERS_CPYTHON_P2_OVERLAY_TELEMETRY_INTERVAL_MS
+	int "P2 CPython overlay report interval (milliseconds)"
+	default 60000
+	range 1000 60000
+	depends on INTERPRETERS_CPYTHON_P2_OVERLAY_TELEMETRY
+	---help---
+		Elapsed time between progress records while the CPython worker is live.
+		The default emits the bounded eight-record P2PY:HOT snapshot about once a
+		minute, plus one final snapshot when the worker exits.
+
+config INTERPRETERS_CPYTHON_P2_DEFAULT_NO_SITE
+	bool "Skip automatic CPython site initialization on P2"
+	default n
+	depends on ARCH_P2
+	---help---
+		Start CPython with PyConfig.site_import disabled on Propeller 2.  This
+		sets sys.flags.no_site without rewriting the command-line arguments.
+		The site module remains available for an explicit import followed by
+		site.main().  This can reduce startup overlay traffic on small-Hub P2
+		targets while preserving an opt-in path for normal site processing.
+
+config INTERPRETERS_CPYTHON_P2_FIXED_PATH_CONFIG
+	bool "Use the fixed NuttX CPython path layout on P2"
+	default n
+	depends on ARCH_P2
+	---help---
+		Populate PyConfig directly from the NuttX CPython filesystem contract
+		instead of evaluating CPython's frozen getpath.py during startup.  The
+		writable path comes from INTERPRETERS_CPYTHON_PYTHONPATH and the standard
+		library archive must be mounted as
+		/usr/local/lib/python<major><minor>.zip.  Leave this disabled for boards
+		that do not provide that exact layout.
+
 config INTERPRETERS_CPYTHON_PRIORITY
 	int "CPython task priority"
 	default 100

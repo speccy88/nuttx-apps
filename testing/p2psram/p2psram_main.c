@@ -56,13 +56,25 @@
 #define P2PSRAM_FNV_PRIME            UINT32_C(16777619)
 #define P2PSRAM_MAX_REQUEST          (64 * 1024)
 #define P2PSRAM_QPI_CLOCK_HZ         5000000
+#define P2PSRAM_BULK_QPI_CLOCK_HZ    90000000
 #define P2PSRAM_CE_LIMIT_CYCLES      1440
 #define P2PSRAM_TICK_USEC            10000
 #define P2PSRAM_TIMEOUT_TICKS        500
 #define P2PSRAM_CANCEL_GRACE_TICKS   100
 #define P2PSRAM_RANDOM_COUNT         1024
+#define P2PSRAM_CONCURRENT_REQUESTS  64
+#define P2PSRAM_CONCURRENT_BYTES     \
+  (P2PSRAM_CONCURRENT_REQUESTS * P2PSRAM_BUFFER_SIZE)
+#define P2PSRAM_COUNTER_HZ           CONFIG_P2_SYSCLK_HZ
+#define P2PSRAM_CONCURRENT_MAX_CYCLES \
+  (UINT32_C(5) * P2PSRAM_COUNTER_HZ)
+#define P2PSRAM_WORK_RATE_SHIFT      20
 #define P2PSRAM_TIMEOUT_DEADLINE     1
-#define P2PSRAM_TIMEOUT_MIN_USEC     24576
+#define P2PSRAM_TIMEOUT_FAULT        "COOPERATIVE_STALL"
+
+#ifndef CONFIG_P2_EC32MB_PSRAM_FAULT_INJECT_TIMEOUT
+#  error "P2 PSRAM HIL requires deterministic timeout fault injection"
+#endif
 
 #if CONFIG_P2_EC32MB_PSRAM_MAX_REQUEST != P2PSRAM_MAX_REQUEST
 #  error "P2 PSRAM HIL requires the exact 64-KiB request profile"
@@ -85,8 +97,8 @@
 #  error "P2 PSRAM HIL timeout proof requires 10-ms scheduler ticks"
 #endif
 
-#if P2PSRAM_TIMEOUT_MIN_USEC <= P2PSRAM_TICK_USEC
-#  error "P2 PSRAM timeout stimulus is not provably longer than one tick"
+#if P2PSRAM_COUNTER_HZ != 180000000
+#  error "P2 PSRAM HIL cycle evidence requires the exact 180-MHz clock"
 #endif
 
 #if P2PSRAM_FNV_PRIME != UINT32_C(0x01000193)
@@ -131,6 +143,14 @@ static int p2psram_fail(FAR const char *stage, int error)
 
   printf("P2PSRAM:FAIL:%s:%d\n", stage, error);
   return EXIT_FAILURE;
+}
+
+static inline uint32_t p2psram_counter(void)
+{
+  uint32_t value;
+
+  __asm__ __volatile__("getct %0" : "=r" (value));
+  return value;
 }
 
 static int p2psram_parse_sequence(FAR const char *text,
@@ -670,17 +690,26 @@ static int p2psram_workload_stop(void)
 }
 
 static int p2psram_concurrent(uint32_t sequence, FAR uint32_t *work,
-                              FAR uint32_t *elapsed_ticks,
+                              FAR uint32_t *elapsed_cycles,
+                              FAR uint32_t *baseline_work_out,
+                              FAR uint32_t *baseline_cycles_out,
                               FAR uint32_t *available_permille)
 {
+  uint64_t baseline_sleep_usec;
+  uint64_t service_rate;
+  uint64_t baseline_rate;
   uint32_t service_work;
   uint32_t service_before;
   uint32_t baseline_work;
   uint32_t baseline_before;
-  clock_t start;
-  clock_t elapsed;
+  uint32_t service_cycles;
+  uint32_t baseline_cycles;
+  uint32_t start_cycles;
+  unsigned int request;
   pid_t pid;
   ssize_t ret;
+  int sleep_error;
+  int sleep_status;
   int status;
 
   p2psram_fill(sequence ^ UINT32_C(0xc011c011), 0,
@@ -691,12 +720,30 @@ static int p2psram_concurrent(uint32_t sequence, FAR uint32_t *work,
       return status;
     }
 
+  sched_yield();
   service_before = g_p2psram_workload_count;
-  start = clock_systime_ticks();
-  ret = p2_psram_transfer(P2_PSRAM_OPERATION_WRITE, 0,
-                          g_p2psram_buffer,
-                          sizeof(g_p2psram_buffer), 0);
-  elapsed = clock_systime_ticks() - start;
+  start_cycles = p2psram_counter();
+  ret = 0;
+  for (request = 0; request < P2PSRAM_CONCURRENT_REQUESTS; request++)
+    {
+      ret = p2_psram_transfer(P2_PSRAM_OPERATION_WRITE,
+                              request * P2PSRAM_BUFFER_SIZE,
+                              g_p2psram_buffer,
+                              sizeof(g_p2psram_buffer), 0);
+      if (ret != sizeof(g_p2psram_buffer))
+        {
+          break;
+        }
+
+      if (p2psram_counter() - start_cycles >
+          P2PSRAM_CONCURRENT_MAX_CYCLES)
+        {
+          ret = -ETIMEDOUT;
+          break;
+        }
+    }
+
+  service_cycles = p2psram_counter() - start_cycles;
   service_work = g_p2psram_workload_count - service_before;
   status = p2psram_workload_stop();
   if (status < 0)
@@ -704,14 +751,20 @@ static int p2psram_concurrent(uint32_t sequence, FAR uint32_t *work,
       return status;
     }
 
-  if (ret != sizeof(g_p2psram_buffer) || service_work == 0 || elapsed <= 0)
+  if (ret != sizeof(g_p2psram_buffer) ||
+      request != P2PSRAM_CONCURRENT_REQUESTS || service_work == 0 ||
+      service_cycles == 0 ||
+      service_cycles > P2PSRAM_CONCURRENT_MAX_CYCLES)
     {
       return ret < 0 ? (int)ret : -EIO;
     }
 
-  /* Run the same yielding workload for the same wall-clock duration with
-   * no PSRAM request.  The ratio is an explicit CPU-availability measure;
-   * its complement is the NuttX CPU occupancy imposed by the service call.
+  /* Run the same yielding workload for approximately the same wall-clock
+   * duration with no PSRAM requests.  Measure both intervals with GETCT and
+   * normalize the work rates, so 10-ms scheduler-tick rounding cannot be
+   * misreported as PSRAM CPU occupancy.  This measures availability on the
+   * NuttX scheduler cog while the separate service cog handles 64 real
+   * requests; it does not claim whole-chip hardware-cog occupancy.
    */
 
   status = p2psram_workload_start(&pid);
@@ -720,19 +773,47 @@ static int p2psram_concurrent(uint32_t sequence, FAR uint32_t *work,
       return status;
     }
 
+  sched_yield();
   baseline_before = g_p2psram_workload_count;
-  usleep(TICK2USEC(elapsed));
+  baseline_sleep_usec =
+    ((uint64_t)service_cycles * UINT64_C(1000000) +
+     P2PSRAM_COUNTER_HZ - 1u) / P2PSRAM_COUNTER_HZ;
+  start_cycles = p2psram_counter();
+  sleep_status = usleep((useconds_t)baseline_sleep_usec);
+  sleep_error = sleep_status < 0 ? errno : 0;
+  baseline_cycles = p2psram_counter() - start_cycles;
   baseline_work = g_p2psram_workload_count - baseline_before;
   status = p2psram_workload_stop();
-  if (status < 0 || baseline_work == 0)
+  if (status < 0)
     {
-      return status < 0 ? status : -EIO;
+      return status;
+    }
+
+  if (sleep_status < 0)
+    {
+      return -sleep_error;
+    }
+
+  if (baseline_work == 0 || baseline_cycles == 0 ||
+      baseline_cycles > P2PSRAM_CONCURRENT_MAX_CYCLES)
+    {
+      return -EIO;
+    }
+
+  service_rate =
+    ((uint64_t)service_work << P2PSRAM_WORK_RATE_SHIFT) / service_cycles;
+  baseline_rate =
+    ((uint64_t)baseline_work << P2PSRAM_WORK_RATE_SHIFT) / baseline_cycles;
+  if (service_rate == 0 || baseline_rate == 0)
+    {
+      return -EAGAIN;
     }
 
   *work = service_work;
-  *elapsed_ticks = elapsed;
-  *available_permille =
-    (uint32_t)((uint64_t)service_work * 1000u / baseline_work);
+  *elapsed_cycles = service_cycles;
+  *baseline_work_out = baseline_work;
+  *baseline_cycles_out = baseline_cycles;
+  *available_permille = (uint32_t)(service_rate * 1000u / baseline_rate);
   if (*available_permille > 1000)
     {
       *available_permille = 1000;
@@ -751,6 +832,12 @@ static int p2psram_timeout_recovery(uint32_t sequence)
   uint32_t expected = sequence ^ UINT32_C(0x5a5aa5a5);
   uint32_t actual;
   ssize_t ret;
+
+  ret = p2_psram_arm_timeout_stall();
+  if (ret < 0)
+    {
+      return (int)ret;
+    }
 
   ret = p2_psram_transfer(P2_PSRAM_OPERATION_READ, 0,
                           g_p2psram_buffer,
@@ -795,7 +882,9 @@ int main(int argc, FAR char *argv[])
   uint32_t read_rate;
   uint32_t checksum;
   uint32_t concurrent_work;
-  uint32_t concurrent_ticks;
+  uint32_t concurrent_cycles;
+  uint32_t baseline_work;
+  uint32_t baseline_cycles;
   uint32_t available_permille;
   int fd;
   int ret;
@@ -817,6 +906,7 @@ int main(int argc, FAR char *argv[])
       geometry.natural_word_bytes != 4 ||
       geometry.max_request_bytes != P2PSRAM_MAX_REQUEST ||
       geometry.qpi_clock_hz != P2PSRAM_QPI_CLOCK_HZ ||
+      geometry.bulk_qpi_clock_hz != P2PSRAM_BULK_QPI_CLOCK_HZ ||
       geometry.ce_low_limit_cycles != P2PSRAM_CE_LIMIT_CYCLES ||
       geometry.service_cog >= 8)
     {
@@ -829,9 +919,11 @@ int main(int argc, FAR char *argv[])
          geometry.size_bytes, geometry.chip_count,
          geometry.chip_size_bytes, geometry.natural_word_bytes,
          geometry.max_request_bytes, geometry.service_cog);
-  printf("P2PSRAM:PROFILE:MAX_REQUEST=%d:QPI_HZ=%d:TICK_USEC=%d"
+  printf("P2PSRAM:PROFILE:MAX_REQUEST=%d:QPI_HZ=%d:BULK_QPI_HZ=%d:"
+         "TICK_USEC=%d"
          ":TIMEOUT_TICKS=%d:CANCEL_GRACE_TICKS=%d\n",
-         P2PSRAM_MAX_REQUEST, P2PSRAM_QPI_CLOCK_HZ, P2PSRAM_TICK_USEC,
+         P2PSRAM_MAX_REQUEST, P2PSRAM_QPI_CLOCK_HZ,
+         P2PSRAM_BULK_QPI_CLOCK_HZ, P2PSRAM_TICK_USEC,
          P2PSRAM_TIMEOUT_TICKS, P2PSRAM_CANCEL_GRACE_TICKS);
 
   fd = open(P2_PSRAM_DEVICE_PATH, O_RDWR);
@@ -886,7 +978,8 @@ int main(int argc, FAR char *argv[])
   printf("P2PSRAM:THROUGHPUT:WRITE_BPS=%" PRIu32
          ":READ_BPS=%" PRIu32 "\n", write_rate, read_rate);
 
-  ret = p2psram_concurrent(sequence, &concurrent_work, &concurrent_ticks,
+  ret = p2psram_concurrent(sequence, &concurrent_work, &concurrent_cycles,
+                            &baseline_work, &baseline_cycles,
                             &available_permille);
   if (ret < 0)
     {
@@ -894,10 +987,14 @@ int main(int argc, FAR char *argv[])
       return p2psram_fail("CONCURRENT", ret);
     }
 
-  printf("P2PSRAM:CONCURRENT:PASS:WORK=%" PRIu32
-         ":ELAPSED_TICKS=%" PRIu32 ":CPU_AVAILABLE_PERMILLE=%" PRIu32
+  printf("P2PSRAM:CONCURRENT:PASS:REQUESTS=%d:BYTES=%d:WORK=%" PRIu32
+         ":ELAPSED_CYCLES=%" PRIu32 ":BASELINE_WORK=%" PRIu32
+         ":BASELINE_CYCLES=%" PRIu32 ":COUNTER_HZ=%d"
+         ":CPU_AVAILABLE_PERMILLE=%" PRIu32
          ":CPU_OCCUPANCY_PERMILLE=%" PRIu32 "\n",
-         concurrent_work, concurrent_ticks, available_permille,
+         P2PSRAM_CONCURRENT_REQUESTS, P2PSRAM_CONCURRENT_BYTES,
+         concurrent_work, concurrent_cycles, baseline_work, baseline_cycles,
+         P2PSRAM_COUNTER_HZ, available_permille,
          1000u - available_permille);
   ret = p2psram_timeout_recovery(sequence);
   if (ret < 0)
@@ -907,9 +1004,9 @@ int main(int argc, FAR char *argv[])
     }
 
   printf("P2PSRAM:TIMEOUT:PASS:RESULT=%d:BYTES=%d:DEADLINE_TICKS=%d"
-         ":MIN_WIRE_USEC=%d:TICK_USEC=%d\n",
+         ":FAULT=%s:TICK_USEC=%d\n",
          ETIMEDOUT, P2PSRAM_BUFFER_SIZE, P2PSRAM_TIMEOUT_DEADLINE,
-         P2PSRAM_TIMEOUT_MIN_USEC, P2PSRAM_TICK_USEC);
+         P2PSRAM_TIMEOUT_FAULT, P2PSRAM_TICK_USEC);
   printf("P2PSRAM:RECOVERY:PASS\n");
   close(fd);
 

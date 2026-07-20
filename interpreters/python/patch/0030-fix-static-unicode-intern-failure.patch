@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 00:00:00 +0000
+Subject: [PATCH] python: fix static Unicode interning failure check
+
+The internal hashtable setter returns zero on success and minus one when an
+entry allocation fails.  Treat that documented error as fatal instead of
+silently marking a string interned even though it was not inserted.
+---
+ Objects/unicodeobject.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Objects/unicodeobject.c b/Objects/unicodeobject.c
+--- a/Objects/unicodeobject.c
++++ b/Objects/unicodeobject.c
+@@ -15100,7 +15100,7 @@ intern_static(PyInterpreterState *interp, PyObject *s /* stolen */)
+         return Py_NewRef(r);
+     }
+ 
+-    if (_Py_hashtable_set(INTERNED_STRINGS, s, s) < -1) {
++    if (_Py_hashtable_set(INTERNED_STRINGS, s, s) < 0) {
+         Py_FatalError("failed to intern static string");
+     }
+ 
+-- 
+2.50.1

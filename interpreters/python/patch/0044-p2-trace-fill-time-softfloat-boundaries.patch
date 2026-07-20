@@ -1,0 +1,136 @@
+From 9b91a837764b94a2459a33d7b275a02aadfe6851 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 20:44:00 -0400
+Subject: [PATCH] p2: trace fill_time soft-float boundaries
+
+Hardware now reaches the final numeric conversion in posixmodule's fill_time,
+but can stop between constructing the nanosecond integer and calling
+PyFloat_FromDouble.  The compact assembly sequence in that interval contains
+four compiler-rt soft-float helpers, so the existing overlay progress samples
+cannot identify the failing input or helper.
+
+On P2/NuttX only, print the raw time_t words and nanoseconds as manual 32-bit
+hex through up_putc, avoiding printf and any diagnostic 64-bit conversion.
+Then evaluate the original expression in volatile stages with direct
+before/after markers around __floatdidf, __floatunsidf, __muldf3, __adddf3,
+and PyFloat_FromDouble.  Keep the tiny output helpers Hub-resident so tracing
+does not create an overlay transition of its own.  Other targets retain the
+original expression exactly.
+---
+ Modules/posixmodule.c | 67 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 67 insertions(+)
+
+diff --git a/Modules/posixmodule.c b/Modules/posixmodule.c
+--- a/Modules/posixmodule.c
++++ b/Modules/posixmodule.c
+@@ -8,6 +8,10 @@
+    test macro, e.g. '_MSC_VER'. */
+ 
+ #include "Python.h"
++
++#if defined(__NuttX__) && defined(__propeller2__)
++#  include <nuttx/arch.h>
++#endif
+ 
+ #ifdef __VXWORKS__
+ #  include "pycore_bitutils.h"    // _Py_popcount32()
+@@ -2501,6 +2505,49 @@
+    _posix_clear((PyObject *)module);
+ }
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++_Static_assert(sizeof(time_t) == 2 * sizeof(uint32_t),
++               "P2 fill_time tracing requires a 64-bit time_t");
++_Static_assert(sizeof(unsigned long) == sizeof(uint32_t),
++               "P2 fill_time tracing requires a 32-bit unsigned long");
++
++_Py_P2_HUB_RESIDENT static void
++p2_fill_time_puts(const char *text)
++{
++    while (*text != '\0') {
++        up_putc((unsigned char)*text++);
++    }
++}
++
++_Py_P2_HUB_RESIDENT static void
++p2_fill_time_puthex32(uint32_t value)
++{
++    static const char digits[] = "0123456789ABCDEF";
++
++    for (int i = 0; i < 8; i++) {
++        up_putc(digits[(value >> 28) & 0xf]);
++        value <<= 4;
++    }
++}
++
++_Py_P2_HUB_RESIDENT static void
++p2_fill_time_trace_raw(time_t sec, unsigned long nsec)
++{
++    union {
++        time_t value;
++        uint32_t words[2];
++    } sec_bits = { .value = sec };
++
++    p2_fill_time_puts("P2PY:FILLTIME:RAW:SECLO=");
++    p2_fill_time_puthex32(sec_bits.words[0]);
++    p2_fill_time_puts(":SECHI=");
++    p2_fill_time_puthex32(sec_bits.words[1]);
++    p2_fill_time_puts(":NSEC=");
++    p2_fill_time_puthex32((uint32_t)nsec);
++    p2_fill_time_puts("\r\n");
++}
++#endif
++
+ static int
+ fill_time(PyObject *module, PyObject *v, int s_index, int f_index, int ns_index, time_t sec, unsigned long nsec)
+ {
+@@ -2510,6 +2557,12 @@
+     PyObject *s_in_ns = NULL;
+     PyObject *ns_total = NULL;
+     PyObject *float_s = NULL;
++#if defined(__NuttX__) && defined(__propeller2__)
++    volatile double sec_as_double;
++    volatile double nsec_as_double;
++    volatile double nsec_scaled;
++    volatile double time_as_double;
++#endif
+ 
+     PyObject *s = _PyLong_FromTime_t(sec);
+     PyObject *ns_fractional = PyLong_FromUnsignedLong(nsec);
+@@ -2526,7 +2579,33 @@
+     if (!ns_total)
+         goto exit;
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++    p2_fill_time_trace_raw(sec, nsec);
++
++    p2_fill_time_puts("P2PY:FILLTIME:FLOATDIDF:BEGIN\r\n");
++    sec_as_double = (double)sec;
++    p2_fill_time_puts("P2PY:FILLTIME:FLOATDIDF:PASS\r\n");
++
++    p2_fill_time_puts("P2PY:FILLTIME:FLOATUNSIDF:BEGIN\r\n");
++    nsec_as_double = (double)nsec;
++    p2_fill_time_puts("P2PY:FILLTIME:FLOATUNSIDF:PASS\r\n");
++
++    p2_fill_time_puts("P2PY:FILLTIME:MULDF3:BEGIN\r\n");
++    nsec_scaled = 1e-9 * nsec_as_double;
++    p2_fill_time_puts("P2PY:FILLTIME:MULDF3:PASS\r\n");
++
++    p2_fill_time_puts("P2PY:FILLTIME:ADDDF3:BEGIN\r\n");
++    time_as_double = sec_as_double + nsec_scaled;
++    p2_fill_time_puts("P2PY:FILLTIME:ADDDF3:PASS\r\n");
++
++    p2_fill_time_puts("P2PY:FILLTIME:PYFLOAT:BEGIN\r\n");
++    float_s = PyFloat_FromDouble(time_as_double);
++    p2_fill_time_puts(float_s != NULL
++                      ? "P2PY:FILLTIME:PYFLOAT:PASS\r\n"
++                      : "P2PY:FILLTIME:PYFLOAT:FAIL\r\n");
++#else
+     float_s = PyFloat_FromDouble(sec + 1e-9*nsec);
++#endif
+     if (!float_s) {
+         goto exit;
+     }
+-- 
+2.50.1
+

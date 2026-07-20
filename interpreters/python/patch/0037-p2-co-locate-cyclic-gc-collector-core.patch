@@ -1,0 +1,306 @@
+From 86fe855ab3a57816a42b9833caa6fef9a1815208 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 18:45:00 -0400
+Subject: [PATCH] p2: co-locate cyclic GC collector core
+
+After the traversal callbacks were moved into explicit group 8, the next
+measured startup phase still crossed from those callbacks into the automatic
+Python/gc.c group EA (E9 before the previous explicit-group insertion).  The
+automatic group contains the collector entry points, gc_collect_main, its
+out-of-line list and reachability helpers, callback dispatch, and the
+remaining linked GC C API bodies.
+
+Move all 31 linked bodies from that automatic source group into explicit
+group 8.  This keeps the complete measured collector source group with the
+14 traversal callbacks that it invokes indirectly.  The old group sizes were
+3,324 bytes for group 8 and 10,836 bytes for EA, each including a four-byte
+group header.  Removing the redundant EA header predicts a 14,156-byte
+(0x374c) merged group, leaving 75,956 bytes in the 90,112-byte slot.  The
+post-link exact allowlist remains the authority for membership and fit.
+---
+ Python/gc.c | 62 +++++++++++++++++++++++++++++++-----------------------
+ 1 file changed, 31 insertions(+), 31 deletions(-)
+
+diff --git a/Python/gc.c b/Python/gc.c
+--- a/Python/gc.c
++++ b/Python/gc.c
+@@ -107,7 +107,7 @@ get_gc_state(void)
+ }
+ 
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ _PyGC_InitState(GCState *gcstate)
+ {
+ #define INIT_HEAD(GEN) \
+@@ -127,7 +127,7 @@ _PyGC_InitState(GCState *gcstate)
+ }
+ 
+ 
+-PyStatus
++_Py_P2_GC_OVERLAY PyStatus
+ _PyGC_Init(PyInterpreterState *interp)
+ {
+     GCState *gcstate = &interp->gc;
+@@ -265,7 +265,7 @@ gc_list_move(PyGC_Head *node, PyGC_Head *list)
+ }
+ 
+ /* append list `from` onto list `to`; `from` becomes an empty list */
+-static void
++_Py_P2_GC_OVERLAY static void
+ gc_list_merge(PyGC_Head *from, PyGC_Head *to)
+ {
+     assert(from != to);
+@@ -309,7 +309,7 @@ gc_list_clear_collecting(PyGC_Head *collectable)
+ /* Append objects in a GC list to a Python list.
+  * Return 0 if all OK, < 0 if error (out of memory for list)
+  */
+-static int
++_Py_P2_GC_OVERLAY static int
+ append_objects(PyObject *py_list, PyGC_Head *gc_list)
+ {
+     PyGC_Head *gc;
+@@ -1075,7 +1075,7 @@ flag set but it does not clear it to skip unnecessary iteration. Before the
+ flag is cleared (for example, by using 'clear_unreachable_mask' function or
+ by a call to 'move_legacy_finalizers'), the 'unreachable' list is not a normal
+ list and we can not use most gc_list_* functions for it. */
+-static inline void
++_Py_P2_GC_OVERLAY static inline void
+ deduce_unreachable(PyGC_Head *base, PyGC_Head *unreachable) {
+     validate_list(base, collecting_clear_unreachable_clear);
+     /* Using ob_refcnt and gc_refs, calculate which objects in the
+@@ -1163,7 +1163,7 @@ handle_resurrected_objects(PyGC_Head *unreachable, PyGC_Head* still_unreachable,
+ /* Invoke progress callbacks to notify clients that garbage collection
+  * is starting or stopping
+  */
+-static void
++_Py_P2_GC_OVERLAY static void
+ invoke_gc_callback(PyThreadState *tstate, const char *phase,
+                    int generation, Py_ssize_t collected,
+                    Py_ssize_t uncollectable)
+@@ -1274,7 +1274,7 @@ gc_select_generation(GCState *gcstate)
+ 
+ /* This is the main function.  Read this to understand how the
+  * collection process works. */
+-static Py_ssize_t
++_Py_P2_GC_OVERLAY static Py_ssize_t
+ gc_collect_main(PyThreadState *tstate, int generation, _PyGC_Reason reason)
+ {
+     int i;
+@@ -1486,7 +1486,7 @@ gc_collect_main(PyThreadState *tstate, int generation, _PyGC_Reason reason)
+     return n + m;
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ referrersvisit(PyObject* obj, void *arg)
+ {
+     PyObject *objs = arg;
+@@ -1520,7 +1520,7 @@ gc_referrers_for(PyObject *objs, PyGC_Head *list, PyObject *resultlist)
+     return 1; /* no error */
+ }
+ 
+-PyObject *
++_Py_P2_GC_OVERLAY PyObject *
+ _PyGC_GetReferrers(PyInterpreterState *interp, PyObject *objs)
+ {
+     PyObject *result = PyList_New(0);
+@@ -1538,7 +1538,7 @@ _PyGC_GetReferrers(PyInterpreterState *interp, PyObject *objs)
+     return result;
+ }
+ 
+-PyObject *
++_Py_P2_GC_OVERLAY PyObject *
+ _PyGC_GetObjects(PyInterpreterState *interp, int generation)
+ {
+     assert(generation >= -1 && generation < NUM_GENERATIONS);
+@@ -1569,7 +1569,7 @@ _PyGC_GetObjects(PyInterpreterState *interp, int generation)
+     return NULL;
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ _PyGC_Freeze(PyInterpreterState *interp)
+ {
+     GCState *gcstate = &interp->gc;
+@@ -1579,7 +1579,7 @@ _PyGC_Freeze(PyInterpreterState *interp)
+     }
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ _PyGC_Unfreeze(PyInterpreterState *interp)
+ {
+     GCState *gcstate = &interp->gc;
+@@ -1587,7 +1587,7 @@ _PyGC_Unfreeze(PyInterpreterState *interp)
+                   GEN_HEAD(gcstate, NUM_GENERATIONS-1));
+ }
+ 
+-Py_ssize_t
++_Py_P2_GC_OVERLAY Py_ssize_t
+ _PyGC_GetFreezeCount(PyInterpreterState *interp)
+ {
+     GCState *gcstate = &interp->gc;
+@@ -1595,7 +1595,7 @@ _PyGC_GetFreezeCount(PyInterpreterState *interp)
+ }
+ 
+ /* C API for controlling the state of the garbage collector */
+-int
++_Py_P2_GC_OVERLAY int
+ PyGC_Enable(void)
+ {
+     GCState *gcstate = get_gc_state();
+@@ -1604,7 +1604,7 @@ PyGC_Enable(void)
+     return old_state;
+ }
+ 
+-int
++_Py_P2_GC_OVERLAY int
+ PyGC_Disable(void)
+ {
+     GCState *gcstate = get_gc_state();
+@@ -1613,7 +1613,7 @@ PyGC_Disable(void)
+     return old_state;
+ }
+ 
+-int
++_Py_P2_GC_OVERLAY int
+ PyGC_IsEnabled(void)
+ {
+     GCState *gcstate = get_gc_state();
+@@ -1621,7 +1621,7 @@ PyGC_IsEnabled(void)
+ }
+ 
+ /* Public API to invoke gc.collect() from C */
+-Py_ssize_t
++_Py_P2_GC_OVERLAY Py_ssize_t
+ PyGC_Collect(void)
+ {
+     PyThreadState *tstate = _PyThreadState_GET();
+@@ -1639,13 +1639,13 @@ PyGC_Collect(void)
+     return n;
+ }
+ 
+-Py_ssize_t
++_Py_P2_GC_OVERLAY Py_ssize_t
+ _PyGC_Collect(PyThreadState *tstate, int generation, _PyGC_Reason reason)
+ {
+     return gc_collect_main(tstate, generation, reason);
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ _PyGC_CollectNoFail(PyThreadState *tstate)
+ {
+     /* Ideally, this function is only called on interpreter shutdown,
+@@ -1657,7 +1657,7 @@ _PyGC_CollectNoFail(PyThreadState *tstate)
+     gc_collect_main(tstate, NUM_GENERATIONS - 1, _Py_GC_REASON_SHUTDOWN);
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ _PyGC_DumpShutdownStats(PyInterpreterState *interp)
+ {
+     GCState *gcstate = &interp->gc;
+@@ -1706,7 +1706,7 @@ finalize_unlink_gc_head(PyGC_Head *gc) {
+     _PyGCHead_SET_PREV(next, prev);
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ _PyGC_Fini(PyInterpreterState *interp)
+ {
+     GCState *gcstate = &interp->gc;
+@@ -1735,7 +1735,7 @@ _PyGC_Fini(PyInterpreterState *interp)
+ }
+ 
+ /* for debugging */
+-void
++_Py_P2_GC_OVERLAY void
+ _PyGC_Dump(PyGC_Head *g)
+ {
+     _PyObject_Dump(FROM_GC(g));
+@@ -1759,7 +1759,7 @@ visit_validate(PyObject *op, void *parent_raw)
+ /* extension modules might be compiled with GC support so these
+    functions must always be available */
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ PyObject_GC_Track(void *op_raw)
+ {
+     PyObject *op = _PyObject_CAST(op_raw);
+@@ -1778,7 +1778,7 @@ PyObject_GC_Track(void *op_raw)
+ #endif
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ PyObject_GC_UnTrack(void *op_raw)
+ {
+     PyObject *op = _PyObject_CAST(op_raw);
+@@ -1827,7 +1827,7 @@ _PyObject_GC_Link(PyObject *op)
+     }
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ _Py_RunGC(PyThreadState *tstate)
+ {
+     GCState *gcstate = get_gc_state();
+@@ -1892,7 +1892,7 @@ _PyObject_GC_NewVar(PyTypeObject *tp, Py_ssize_t nitems)
+     return op;
+ }
+ 
+-PyObject *
++_Py_P2_GC_OVERLAY PyObject *
+ PyUnstable_Object_GC_NewWithExtraData(PyTypeObject *tp, size_t extra_size)
+ {
+     size_t presize = _PyType_PreHeaderSize(tp);
+@@ -1905,7 +1905,7 @@ PyUnstable_Object_GC_NewWithExtraData(PyTypeObject *tp, size_t extra_size)
+     return op;
+ }
+ 
+-PyVarObject *
++_Py_P2_GC_OVERLAY PyVarObject *
+ _PyObject_GC_Resize(PyVarObject *op, Py_ssize_t nitems)
+ {
+     const size_t basicsize = _PyObject_VAR_SIZE(Py_TYPE(op), nitems);
+@@ -1924,7 +1924,7 @@ _PyObject_GC_Resize(PyVarObject *op, Py_ssize_t nitems)
+     return op;
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ PyObject_GC_Del(void *op)
+ {
+     size_t presize = _PyType_PreHeaderSize(((PyObject *)op)->ob_type);
+@@ -1948,7 +1948,7 @@ PyObject_GC_Del(void *op)
+     PyObject_Free(((char *)op)-presize);
+ }
+ 
+-int
++_Py_P2_GC_OVERLAY int
+ PyObject_GC_IsTracked(PyObject* obj)
+ {
+     if (_PyObject_IS_GC(obj) && _PyObject_GC_IS_TRACKED(obj)) {
+@@ -1957,7 +1957,7 @@ PyObject_GC_IsTracked(PyObject* obj)
+     return 0;
+ }
+ 
+-int
++_Py_P2_GC_OVERLAY int
+ PyObject_GC_IsFinalized(PyObject *obj)
+ {
+     if (_PyObject_IS_GC(obj) && _PyGC_FINALIZED(obj)) {
+@@ -1966,7 +1966,7 @@ PyObject_GC_IsFinalized(PyObject *obj)
+     return 0;
+ }
+ 
+-void
++_Py_P2_GC_OVERLAY void
+ PyUnstable_GC_VisitObjects(gcvisitobjects_t callback, void *arg)
+ {
+     size_t i;
+-- 
+2.50.1
+

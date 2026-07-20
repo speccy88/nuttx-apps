@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 20 Jul 2026 07:18:00 -0400
+Subject: [PATCH] p2: freeze startup encodings selectively
+
+The r12 ENCODINGS window spent 666 seconds in ordinary frozen-importlib pyc
+classification and loading, with 59,405 overlay loads and 1.88 GB of copied
+overlay code.  Freeze only the codecs needed by normal and isolated P2
+startup: the encodings package, its aliases table, and UTF-8.
+
+The three generated payloads total 20,587 bytes.  P2 external constant-data
+placement is expected to keep their symbols in 0x10000000..0x11ffffff rather
+than consume Hub image space; the normal post-link residency audit remains
+the authority for that placement on the next firmware build.
+
+Gate the extra specs on an environment variable supplied only by the NuttX P2
+application Makefile.  Generic CPython regeneration retains its upstream
+module set.  Commit the generated Unix build and frozen-table outputs so
+configure sees the new header rules before the target Makefile exists; the
+existing regen-frozen step then materializes the generated headers.  A
+follow-up generated-output patch records the CRLF PCbuild project files.
+---
+ Makefile.pre.in               | 15 +++++++++++++++
+ Python/frozen.c               |  6 ++++++
+ Tools/build/freeze_modules.py | 11 +++++++++++
+ 3 files changed, 32 insertions(+)
+
+diff --git a/Tools/build/freeze_modules.py b/Tools/build/freeze_modules.py
+--- a/Tools/build/freeze_modules.py
++++ b/Tools/build/freeze_modules.py
+@@ -36,5 +36,13 @@ OS_PATH = 'ntpath' if os.name == 'nt' else 'posixpath'
+ # This also speeds up building somewhat.
+ TESTS_SECTION = 'Test module'
++NUTTX_P2_STARTUP_ENCODINGS = ()
++if os.environ.get('NUTTX_P2_FREEZE_STARTUP_ENCODINGS') == '1':
++    NUTTX_P2_STARTUP_ENCODINGS = (
++        '<encodings>',
++        'encodings.aliases',
++        'encodings.utf_8',
++    )
++
+ FROZEN = [
+     # See parse_frozen_spec() for the format.
+     # In cases where the frozenid is duplicated, the first one is re-used.
+@@ -55,6 +63,9 @@ FROZEN = [
+         # those extra modules add to the text printed during the build.
+         # (See https://github.com/python/cpython/pull/28398#pullrequestreview-756856469.)
+         #'<encodings.*>',
++        # NuttX P2 opts into the exact startup subset above without
++        # changing the generic CPython frozen-module set.
++        *NUTTX_P2_STARTUP_ENCODINGS,
+         'io',
+         ]),
+     ('stdlib - startup, with site', [
+diff --git a/Makefile.pre.in b/Makefile.pre.in
+--- a/Makefile.pre.in
++++ b/Makefile.pre.in
+@@ -1481,6 +1481,9 @@
+ 		Lib/zipimport.py \
+ 		Lib/abc.py \
+ 		Lib/codecs.py \
++		Lib/encodings/__init__.py \
++		Lib/encodings/aliases.py \
++		Lib/encodings/utf_8.py \
+ 		Lib/io.py \
+ 		Lib/_collections_abc.py \
+ 		Lib/_sitebuiltins.py \
+@@ -1506,6 +1509,9 @@
+ 		Python/frozen_modules/zipimport.h \
+ 		Python/frozen_modules/abc.h \
+ 		Python/frozen_modules/codecs.h \
++		Python/frozen_modules/encodings.h \
++		Python/frozen_modules/encodings.aliases.h \
++		Python/frozen_modules/encodings.utf_8.h \
+ 		Python/frozen_modules/io.h \
+ 		Python/frozen_modules/_collections_abc.h \
+ 		Python/frozen_modules/_sitebuiltins.h \
+@@ -1554,6 +1560,15 @@
+ Python/frozen_modules/codecs.h: Lib/codecs.py $(FREEZE_MODULE_DEPS)
+ 	$(FREEZE_MODULE) codecs $(srcdir)/Lib/codecs.py Python/frozen_modules/codecs.h
+ 
++Python/frozen_modules/encodings.h: Lib/encodings/__init__.py $(FREEZE_MODULE_DEPS)
++	$(FREEZE_MODULE) encodings $(srcdir)/Lib/encodings/__init__.py Python/frozen_modules/encodings.h
++
++Python/frozen_modules/encodings.aliases.h: Lib/encodings/aliases.py $(FREEZE_MODULE_DEPS)
++	$(FREEZE_MODULE) encodings.aliases $(srcdir)/Lib/encodings/aliases.py Python/frozen_modules/encodings.aliases.h
++
++Python/frozen_modules/encodings.utf_8.h: Lib/encodings/utf_8.py $(FREEZE_MODULE_DEPS)
++	$(FREEZE_MODULE) encodings.utf_8 $(srcdir)/Lib/encodings/utf_8.py Python/frozen_modules/encodings.utf_8.h
++
+ Python/frozen_modules/io.h: Lib/io.py $(FREEZE_MODULE_DEPS)
+ 	$(FREEZE_MODULE) io $(srcdir)/Lib/io.py Python/frozen_modules/io.h
+ 
+diff --git a/Python/frozen.c b/Python/frozen.c
+--- a/Python/frozen.c
++++ b/Python/frozen.c
+@@ -46,6 +46,9 @@
+ #include "frozen_modules/zipimport.h"
+ #include "frozen_modules/abc.h"
+ #include "frozen_modules/codecs.h"
++#include "frozen_modules/encodings.h"
++#include "frozen_modules/encodings.aliases.h"
++#include "frozen_modules/encodings.utf_8.h"
+ #include "frozen_modules/io.h"
+ #include "frozen_modules/_collections_abc.h"
+ #include "frozen_modules/_sitebuiltins.h"
+@@ -76,6 +79,9 @@
+     /* stdlib - startup, without site (python -S) */
+     {"abc", _Py_M__abc, (int)sizeof(_Py_M__abc), false},
+     {"codecs", _Py_M__codecs, (int)sizeof(_Py_M__codecs), false},
++    {"encodings", _Py_M__encodings, (int)sizeof(_Py_M__encodings), true},
++    {"encodings.aliases", _Py_M__encodings_aliases, (int)sizeof(_Py_M__encodings_aliases), false},
++    {"encodings.utf_8", _Py_M__encodings_utf_8, (int)sizeof(_Py_M__encodings_utf_8), false},
+     {"io", _Py_M__io, (int)sizeof(_Py_M__io), false},
+ 
+     /* stdlib - startup, with site */
+-- 
+2.50.1

@@ -1,0 +1,159 @@
+From 5eb4cb18b3e832095d610728b520d9a309b83d5f Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 18:21:00 -0400
+Subject: [PATCH] p2: co-locate frozen-code bootstrap loops
+
+The first hardware run beyond PYCORE_TYPES completed all 113 static types but
+then transferred more than a gigabyte of overlay payload while initializing
+frozen importlib.  Samples identified two tight cross-group loops.
+
+Every new code object runs _PyCode_Quicken, which calls _Py_GetBaseOpcode once
+per bytecode instruction.  Put those two measured bodies in a dedicated small
+group 9.  Their previous linked sizes plus the group header total 440 bytes.
+
+Immortal Unicode interning enters the existing group-7 intern_common path and
+then bounces through two object helpers.  Keep the wrapper and both helpers in
+group 7.  Their previous linked bodies total 260 bytes; the measured 89,816
+byte group becomes 90,076 bytes in the 90,112-byte slot, leaving 36 bytes.
+The post-link residency verifier remains the hard authority for fit.
+---
+ Include/internal/pycore_code.h          |  3 ++-
+ Include/internal/pycore_object.h        |  4 ++--
+ Include/internal/pycore_unicodeobject.h |  3 ++-
+ Include/pyport.h                        |  2 ++
+ Objects/codeobject.c                    |  2 +-
+ Objects/object.c                        |  4 ++--
+ Objects/unicodeobject.c                 |  2 +-
+ Python/instrumentation.c                |  3 ++-
+ Python/specialize.c                     |  2 +-
+ 9 files changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/Include/pyport.h b/Include/pyport.h
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -5,11 +5,13 @@
+ #  define _Py_P2_HUB_RESIDENT __attribute__((p2_hub_resident))
+ #  define _Py_P2_INIT_OVERLAY __attribute__((p2_hub_overlay(7)))
+ #  define _Py_P2_GC_OVERLAY __attribute__((p2_hub_overlay(8)))
++#  define _Py_P2_CODEINIT_OVERLAY __attribute__((p2_hub_overlay(9)))
+ #  define _Py_P2_UTF8_OVERLAY __attribute__((p2_hub_overlay(6)))
+ #else
+ #  define _Py_P2_HUB_RESIDENT
+ #  define _Py_P2_INIT_OVERLAY
+ #  define _Py_P2_GC_OVERLAY
++#  define _Py_P2_CODEINIT_OVERLAY
+ #  define _Py_P2_UTF8_OVERLAY
+ #endif
+ 
+diff --git a/Include/internal/pycore_code.h b/Include/internal/pycore_code.h
+--- a/Include/internal/pycore_code.h
++++ b/Include/internal/pycore_code.h
+@@ -586,7 +586,8 @@
+ 
+ extern int _Py_Instrument(PyCodeObject *co, PyInterpreterState *interp);
+ 
+-extern int _Py_GetBaseOpcode(PyCodeObject *code, int offset);
++extern int _Py_GetBaseOpcode(PyCodeObject *code, int offset)
++    _Py_P2_CODEINIT_OVERLAY;
+ 
+ extern int _PyInstruction_GetLength(PyCodeObject *code, int offset);
+ 
+diff --git a/Include/internal/pycore_object.h b/Include/internal/pycore_object.h
+--- a/Include/internal/pycore_object.h
++++ b/Include/internal/pycore_object.h
+@@ -150,8 +150,8 @@
+ }
+ #define _Py_RefcntAdd(op, n) _Py_RefcntAdd(_PyObject_CAST(op), n)
+ 
+-extern void _Py_SetImmortal(PyObject *op);
+-extern void _Py_SetImmortalUntracked(PyObject *op);
++extern void _Py_SetImmortal(PyObject *op) _Py_P2_INIT_OVERLAY;
++extern void _Py_SetImmortalUntracked(PyObject *op) _Py_P2_INIT_OVERLAY;
+ 
+ // Makes an immortal object mortal again with the specified refcnt. Should only
+ // be used during runtime finalization.
+diff --git a/Include/internal/pycore_unicodeobject.h b/Include/internal/pycore_unicodeobject.h
+--- a/Include/internal/pycore_unicodeobject.h
++++ b/Include/internal/pycore_unicodeobject.h
+@@ -285,7 +285,8 @@
+ 
+ // Explicit interning routines:
+ PyAPI_FUNC(void) _PyUnicode_InternMortal(PyInterpreterState *interp, PyObject **) _Py_P2_INIT_OVERLAY;
+-PyAPI_FUNC(void) _PyUnicode_InternImmortal(PyInterpreterState *interp, PyObject **);
++PyAPI_FUNC(void) _PyUnicode_InternImmortal(PyInterpreterState *interp, PyObject **)
++    _Py_P2_INIT_OVERLAY;
+ // Left here to help backporting:
+ PyAPI_FUNC(void) _PyUnicode_InternInPlace(PyInterpreterState *interp, PyObject **p);
+ // Only for singletons in the _PyRuntime struct:
+diff --git a/Objects/codeobject.c b/Objects/codeobject.c
+--- a/Objects/codeobject.c
++++ b/Objects/codeobject.c
+@@ -447,7 +447,7 @@
+     return 0;
+ }
+ 
+-extern void _PyCode_Quicken(PyCodeObject *code);
++extern void _PyCode_Quicken(PyCodeObject *code) _Py_P2_CODEINIT_OVERLAY;
+ 
+ static void
+ init_code(PyCodeObject *co, struct _PyCodeConstructor *con)
+diff --git a/Objects/unicodeobject.c b/Objects/unicodeobject.c
+--- a/Objects/unicodeobject.c
++++ b/Objects/unicodeobject.c
+@@ -15256,7 +15256,7 @@
+     return s;
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _PyUnicode_InternImmortal(PyInterpreterState *interp, PyObject **p)
+ {
+     *p = intern_common(interp, *p, 1);
+diff --git a/Objects/object.c b/Objects/object.c
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -2437,7 +2437,7 @@
+     new_reference(op);
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _Py_SetImmortalUntracked(PyObject *op)
+ {
+ #ifdef Py_DEBUG
+@@ -2456,7 +2456,7 @@
+ #endif
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _Py_SetImmortal(PyObject *op)
+ {
+     if (PyObject_IS_GC(op) && _PyObject_GC_IS_TRACKED(op)) {
+diff --git a/Python/instrumentation.c b/Python/instrumentation.c
+--- a/Python/instrumentation.c
++++ b/Python/instrumentation.c
+@@ -580,7 +580,8 @@
+ #endif
+ 
+ /* Get the underlying opcode, stripping instrumentation */
+-int _Py_GetBaseOpcode(PyCodeObject *code, int i)
++_Py_P2_CODEINIT_OVERLAY int
++_Py_GetBaseOpcode(PyCodeObject *code, int i)
+ {
+     int opcode = _PyCode_CODE(code)[i].op.code;
+     if (opcode == INSTRUMENTED_LINE) {
+diff --git a/Python/specialize.c b/Python/specialize.c
+--- a/Python/specialize.c
++++ b/Python/specialize.c
+@@ -422,7 +422,7 @@
+ #endif
+ 
+ // Initialize warmup counters and insert superinstructions. This cannot fail.
+-void
++_Py_P2_CODEINIT_OVERLAY void
+ _PyCode_Quicken(PyCodeObject *code)
+ {
+     #if ENABLE_SPECIALIZATION
+-- 
+2.50.1

@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 20 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: add fixed path config fast path
+
+The NuttX P2 image has a board-defined Python layout: a writable path and a
+versioned standard-library ZIP under /usr/local/lib.  Let the wrapper opt into
+populating PyConfig directly for that layout.  This avoids evaluating frozen
+getpath.py, whose interpreter and overlay traffic dominates startup on P2.
+
+Keep the hook and implementation behind both the NuttX P2 target and the new
+Kconfig option.  Without an explicit wrapper call, the normal frozen getpath
+implementation remains the fallback.  Emit bounded markers around the fixed
+calculation so HIL can distinguish entry, success, and failure.
+---
+ Modules/getpath.c | 99 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 99 insertions(+)
+
+diff --git a/Modules/getpath.c b/Modules/getpath.c
+--- a/Modules/getpath.c
++++ b/Modules/getpath.c
+@@ -10,7 +10,11 @@
+ #include "marshal.h"              // PyMarshal_ReadObjectFromString
+ #include "osdefs.h"               // DELIM
+ #include <wchar.h>
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  include <nuttx/config.h>
++#endif
++
+ #ifdef MS_WINDOWS
+ #  include <windows.h>            // GetFullPathNameW(), MAX_PATH
+ #  include <pathcch.h>
+@@ -55,6 +59,24 @@
+ #endif
+ 
+ 
++#if defined(__NuttX__) && defined(__propeller2__) && \
++    defined(CONFIG_INTERPRETERS_CPYTHON_P2_FIXED_PATH_CONFIG)
++#  define P2_STRINGIFY_(value) #value
++#  define P2_STRINGIFY(value) P2_STRINGIFY_(value)
++#  define P2_WIDEN_(value) L##value
++#  define P2_WIDEN(value) P2_WIDEN_(value)
++#  define P2_WSTRINGIFY(value) P2_WIDEN(P2_STRINGIFY(value))
++#  define P2_STDLIB_DIR \
++    L"/usr/local/lib/python" P2_WSTRINGIFY(PY_MAJOR_VERSION) L"." \
++    P2_WSTRINGIFY(PY_MINOR_VERSION)
++#  define P2_STDLIB_ZIP \
++    L"/usr/local/lib/python" P2_WSTRINGIFY(PY_MAJOR_VERSION) \
++    P2_WSTRINGIFY(PY_MINOR_VERSION) L".zip"
++
++static const wchar_t *p2_fixed_pythonpath
++    __attribute__((section(".p2.hub.data")));
++#endif
++
+ /* HELPER FUNCTIONS for getpath.py */
+ 
+ static PyObject *
+@@ -837,6 +859,68 @@ library_to_dict(PyObject *dict, const char *key)
+ }
+ 
+ 
++#if defined(__NuttX__) && defined(__propeller2__) && \
++    defined(CONFIG_INTERPRETERS_CPYTHON_P2_FIXED_PATH_CONFIG)
++_Py_P2_HUB_RESIDENT void
++py_p2_set_fixed_path_config(const wchar_t *writable_path)
++{
++    p2_fixed_pythonpath = writable_path;
++}
++
++static PyStatus
++p2_init_fixed_path_config(PyConfig *config)
++{
++    PyStatus status;
++
++    status = PyConfig_SetString(config, &config->executable,
++                                L"/usr/local/bin/python");
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++    status = PyConfig_SetString(config, &config->base_executable,
++                                L"/usr/local/bin/python");
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++    status = PyConfig_SetString(config, &config->prefix, L"/usr/local");
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++    status = PyConfig_SetString(config, &config->base_prefix, L"/usr/local");
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++    status = PyConfig_SetString(config, &config->exec_prefix, L"/usr/local");
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++    status = PyConfig_SetString(config, &config->base_exec_prefix,
++                                L"/usr/local");
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++    status = PyConfig_SetString(config, &config->stdlib_dir, P2_STDLIB_DIR);
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++
++    _PyWideStringList_Clear(&config->module_search_paths);
++    status = PyWideStringList_Append(&config->module_search_paths,
++                                     p2_fixed_pythonpath);
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++    status = PyWideStringList_Append(&config->module_search_paths,
++                                     P2_STDLIB_ZIP);
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++    config->module_search_paths_set = 1;
++    return _PyStatus_OK();
++}
++#endif
++
++
+ PyObject *
+ _Py_Get_Getpath_CodeObject(void)
+ {
+@@ -868,6 +952,21 @@ _PyConfig_InitPathConfig(PyConfig *config, int compute_path_config)
+         return status;
+     }
+ 
++#if defined(__NuttX__) && defined(__propeller2__) && \
++    defined(CONFIG_INTERPRETERS_CPYTHON_P2_FIXED_PATH_CONFIG)
++    if (p2_fixed_pythonpath) {
++        printf("P2PY:PATHCONFIG:BEGIN\n");
++        status = p2_init_fixed_path_config(config);
++        if (_PyStatus_EXCEPTION(status)) {
++            printf("P2PY:PATHCONFIG:FAIL\n");
++        }
++        else {
++            printf("P2PY:PATHCONFIG:PASS\n");
++        }
++        return status;
++    }
++#endif
++
+     if (!_PyThreadState_GET()) {
+         return PyStatus_Error("cannot calculate path configuration without GIL");
+     }
+-- 
+2.50.1

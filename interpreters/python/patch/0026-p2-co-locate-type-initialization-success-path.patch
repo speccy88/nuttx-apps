@@ -1,0 +1,1129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 18 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: co-locate type initialization successful path
+
+Keeping all of pylifecycle.c in the type-init overlay also moves unrelated
+lifecycle code into a large group and does not cover the helper calls that
+actually evict the static-type loop.  Restore pylifecycle.c to startup group
+4 and place the measured 67-function successful-path closure in group 7.
+Keep the GIL-build deferred-refcount no-op resident so it never forces a
+large overlay load and costs no more than its former stub.
+
+Annotate only the concrete definitions and matching declarations, including
+the static forward declarations.  This keeps unrelated functions in their
+existing source-assigned overlay groups and leaves non-P2 builds unchanged.
+---
+diff --git a/Include/cpython/descrobject.h b/Include/cpython/descrobject.h
+--- a/Include/cpython/descrobject.h
++++ b/Include/cpython/descrobject.h
+@@ -58,5 +58,5 @@
+ } PyWrapperDescrObject;
+ 
+ PyAPI_FUNC(PyObject *) PyDescr_NewWrapper(PyTypeObject *,
+-                                                struct wrapperbase *, void *);
++                                                struct wrapperbase *, void *) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(int) PyDescr_IsData(PyObject *);
+diff --git a/Include/cpython/dictobject.h b/Include/cpython/dictobject.h
+--- a/Include/cpython/dictobject.h
++++ b/Include/cpython/dictobject.h
+@@ -49,7 +49,7 @@
+ //   -1 on error
+ //    0 if `key` was not present and `default_value` was inserted
+ //    1 if `key` was present and `default_value` was not inserted
+-PyAPI_FUNC(int) PyDict_SetDefaultRef(PyObject *mp, PyObject *key, PyObject *default_value, PyObject **result);
++PyAPI_FUNC(int) PyDict_SetDefaultRef(PyObject *mp, PyObject *key, PyObject *default_value, PyObject **result) _Py_P2_INIT_OVERLAY;
+ 
+ /* Get the number of items of a dictionary. */
+ static inline Py_ssize_t PyDict_GET_SIZE(PyObject *op) {
+diff --git a/Include/cpython/funcobject.h b/Include/cpython/funcobject.h
+--- a/Include/cpython/funcobject.h
++++ b/Include/cpython/funcobject.h
+@@ -126,7 +126,7 @@
+ PyAPI_DATA(PyTypeObject) PyStaticMethod_Type;
+ 
+ PyAPI_FUNC(PyObject *) PyClassMethod_New(PyObject *);
+-PyAPI_FUNC(PyObject *) PyStaticMethod_New(PyObject *);
++PyAPI_FUNC(PyObject *) PyStaticMethod_New(PyObject *) _Py_P2_INIT_OVERLAY;
+ 
+ #define PY_FOREACH_FUNC_EVENT(V) \
+     V(CREATE)                    \
+diff --git a/Include/cpython/lock.h b/Include/cpython/lock.h
+--- a/Include/cpython/lock.h
++++ b/Include/cpython/lock.h
+@@ -31,10 +31,10 @@
+ } PyMutex;
+ 
+ // exported function for locking the mutex
+-PyAPI_FUNC(void) PyMutex_Lock(PyMutex *m);
++PyAPI_FUNC(void) PyMutex_Lock(PyMutex *m) _Py_P2_INIT_OVERLAY;
+ 
+ // exported function for unlocking the mutex
+-PyAPI_FUNC(void) PyMutex_Unlock(PyMutex *m);
++PyAPI_FUNC(void) PyMutex_Unlock(PyMutex *m) _Py_P2_INIT_OVERLAY;
+ 
+ // Locks the mutex.
+ //
+diff --git a/Include/cpython/longintrepr.h b/Include/cpython/longintrepr.h
+--- a/Include/cpython/longintrepr.h
++++ b/Include/cpython/longintrepr.h
+@@ -100,7 +100,7 @@
+     _PyLongValue long_value;
+ };
+ 
+-PyAPI_FUNC(PyLongObject*) _PyLong_New(Py_ssize_t);
++PyAPI_FUNC(PyLongObject*) _PyLong_New(Py_ssize_t) _Py_P2_INIT_OVERLAY;
+ 
+ // Return a copy of src.
+ PyAPI_FUNC(PyObject*) _PyLong_Copy(PyLongObject *src);
+diff --git a/Include/cpython/object.h b/Include/cpython/object.h
+--- a/Include/cpython/object.h
++++ b/Include/cpython/object.h
+@@ -2,8 +2,8 @@
+ #  error "this header file must not be included directly"
+ #endif
+ 
+-PyAPI_FUNC(void) _Py_NewReference(PyObject *op);
+-PyAPI_FUNC(void) _Py_NewReferenceNoTotal(PyObject *op);
++PyAPI_FUNC(void) _Py_NewReference(PyObject *op) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(void) _Py_NewReferenceNoTotal(PyObject *op) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(void) _Py_ResurrectReference(PyObject *op);
+ 
+ #ifdef Py_REF_DEBUG
+diff --git a/Include/cpython/objimpl.h b/Include/cpython/objimpl.h
+--- a/Include/cpython/objimpl.h
++++ b/Include/cpython/objimpl.h
+@@ -75,7 +75,7 @@
+ 
+ 
+ /* Test if an object implements the garbage collector protocol */
+-PyAPI_FUNC(int) PyObject_IS_GC(PyObject *obj);
++PyAPI_FUNC(int) PyObject_IS_GC(PyObject *obj) _Py_P2_INIT_OVERLAY;
+ 
+ 
+ // Test if a type supports weak references
+diff --git a/Include/cpython/unicodeobject.h b/Include/cpython/unicodeobject.h
+--- a/Include/cpython/unicodeobject.h
++++ b/Include/cpython/unicodeobject.h
+@@ -386,7 +386,7 @@
+ PyAPI_FUNC(PyObject*) PyUnicode_New(
+     Py_ssize_t size,            /* Number of code points in the new string */
+     Py_UCS4 maxchar             /* maximum code point value in the string */
+-    );
++    ) _Py_P2_INIT_OVERLAY;
+ 
+ /* For backward compatibility */
+ static inline int PyUnicode_READY(PyObject* Py_UNUSED(op))
+diff --git a/Include/descrobject.h b/Include/descrobject.h
+--- a/Include/descrobject.h
++++ b/Include/descrobject.h
+@@ -24,10 +24,10 @@
+ PyAPI_DATA(PyTypeObject) PyDictProxy_Type;
+ PyAPI_DATA(PyTypeObject) PyProperty_Type;
+ 
+-PyAPI_FUNC(PyObject *) PyDescr_NewMethod(PyTypeObject *, PyMethodDef *);
+-PyAPI_FUNC(PyObject *) PyDescr_NewClassMethod(PyTypeObject *, PyMethodDef *);
+-PyAPI_FUNC(PyObject *) PyDescr_NewMember(PyTypeObject *, PyMemberDef *);
+-PyAPI_FUNC(PyObject *) PyDescr_NewGetSet(PyTypeObject *, PyGetSetDef *);
++PyAPI_FUNC(PyObject *) PyDescr_NewMethod(PyTypeObject *, PyMethodDef *) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) PyDescr_NewClassMethod(PyTypeObject *, PyMethodDef *) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) PyDescr_NewMember(PyTypeObject *, PyMemberDef *) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) PyDescr_NewGetSet(PyTypeObject *, PyGetSetDef *) _Py_P2_INIT_OVERLAY;
+ 
+ PyAPI_FUNC(PyObject *) PyDictProxy_New(PyObject *);
+ PyAPI_FUNC(PyObject *) PyWrapper_New(PyObject *, PyObject *);
+diff --git a/Include/dictobject.h b/Include/dictobject.h
+--- a/Include/dictobject.h
++++ b/Include/dictobject.h
+@@ -18,10 +18,10 @@
+                  PyType_FastSubclass(Py_TYPE(op), Py_TPFLAGS_DICT_SUBCLASS)
+ #define PyDict_CheckExact(op) Py_IS_TYPE((op), &PyDict_Type)
+ 
+-PyAPI_FUNC(PyObject *) PyDict_New(void);
++PyAPI_FUNC(PyObject *) PyDict_New(void) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyDict_GetItem(PyObject *mp, PyObject *key);
+ PyAPI_FUNC(PyObject *) PyDict_GetItemWithError(PyObject *mp, PyObject *key);
+-PyAPI_FUNC(int) PyDict_SetItem(PyObject *mp, PyObject *key, PyObject *item);
++PyAPI_FUNC(int) PyDict_SetItem(PyObject *mp, PyObject *key, PyObject *item) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(int) PyDict_DelItem(PyObject *mp, PyObject *key);
+ PyAPI_FUNC(void) PyDict_Clear(PyObject *mp);
+ PyAPI_FUNC(int) PyDict_Next(
+@@ -31,7 +31,7 @@
+ PyAPI_FUNC(PyObject *) PyDict_Items(PyObject *mp);
+ PyAPI_FUNC(Py_ssize_t) PyDict_Size(PyObject *mp);
+ PyAPI_FUNC(PyObject *) PyDict_Copy(PyObject *mp);
+-PyAPI_FUNC(int) PyDict_Contains(PyObject *mp, PyObject *key);
++PyAPI_FUNC(int) PyDict_Contains(PyObject *mp, PyObject *key) _Py_P2_INIT_OVERLAY;
+ 
+ /* PyDict_Update(mp, other) is equivalent to PyDict_Merge(mp, other, 1). */
+ PyAPI_FUNC(int) PyDict_Update(PyObject *mp, PyObject *other);
+diff --git a/Include/internal/pycore_dict.h b/Include/internal/pycore_dict.h
+--- a/Include/internal/pycore_dict.h
++++ b/Include/internal/pycore_dict.h
+@@ -85,7 +85,7 @@
+     PyObject *me_value; /* This field is only meaningful for combined tables */
+ } PyDictUnicodeEntry;
+ 
+-extern PyDictKeysObject *_PyDict_NewKeysForClass(void);
++extern PyDictKeysObject *_PyDict_NewKeysForClass(void) _Py_P2_INIT_OVERLAY;
+ extern PyObject *_PyDict_FromKeys(PyObject *, PyObject *, PyObject *);
+ 
+ /* Gets a version number unique to the current state of the keys of dict, if possible.
+@@ -100,7 +100,7 @@
+ /* _Py_dict_lookup() returns index of entry which can be used like DK_ENTRIES(dk)[index].
+  * -1 when no entry found, -3 when compare raises error.
+  */
+-extern Py_ssize_t _Py_dict_lookup(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject **value_addr);
++extern Py_ssize_t _Py_dict_lookup(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject **value_addr) _Py_P2_INIT_OVERLAY;
+ extern Py_ssize_t _Py_dict_lookup_threadsafe(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject **value_addr);
+ 
+ extern Py_ssize_t _PyDict_LookupIndex(PyDictObject *, PyObject *);
+@@ -108,7 +108,7 @@
+ PyAPI_FUNC(PyObject *)_PyDict_LoadGlobal(PyDictObject *, PyDictObject *, PyObject *);
+ 
+ /* Consumes references to key and value */
+-PyAPI_FUNC(int) _PyDict_SetItem_Take2(PyDictObject *op, PyObject *key, PyObject *value);
++PyAPI_FUNC(int) _PyDict_SetItem_Take2(PyDictObject *op, PyObject *key, PyObject *value) _Py_P2_INIT_OVERLAY;
+ extern int _PyDict_SetItem_LockHeld(PyDictObject *dict, PyObject *name, PyObject *value);
+ // Export for '_asyncio' shared extension
+ PyAPI_FUNC(int) _PyDict_SetItem_KnownHash_LockHeld(PyDictObject *mp, PyObject *key,
+@@ -260,7 +260,7 @@
+                   PyDict_WatchEvent event,
+                   PyDictObject *mp,
+                   PyObject *key,
+-                  PyObject *value);
++                  PyObject *value) _Py_P2_INIT_OVERLAY;
+ 
+ static inline uint64_t
+ _PyDict_NotifyEvent(PyInterpreterState *interp,
+diff --git a/Include/internal/pycore_gc.h b/Include/internal/pycore_gc.h
+--- a/Include/internal/pycore_gc.h
++++ b/Include/internal/pycore_gc.h
+@@ -351,7 +351,7 @@
+ 
+ // Functions to clear types free lists
+ extern void _PyGC_ClearAllFreeLists(PyInterpreterState *interp);
+-extern void _Py_ScheduleGC(PyThreadState *tstate);
++extern void _Py_ScheduleGC(PyThreadState *tstate) _Py_P2_INIT_OVERLAY;
+ extern void _Py_RunGC(PyThreadState *tstate);
+ 
+ #ifdef Py_GIL_DISABLED
+diff --git a/Include/internal/pycore_lock.h b/Include/internal/pycore_lock.h
+--- a/Include/internal/pycore_lock.h
++++ b/Include/internal/pycore_lock.h
+@@ -66,7 +66,7 @@
+ 
+ // Unlock a mutex, returns 0 if the mutex is not locked (used for improved
+ // error messages).
+-extern int _PyMutex_TryUnlock(PyMutex *m);
++extern int _PyMutex_TryUnlock(PyMutex *m) _Py_P2_INIT_OVERLAY;
+ 
+ 
+ // PyEvent is a one-time event notification
+diff --git a/Include/internal/pycore_object.h b/Include/internal/pycore_object.h
+--- a/Include/internal/pycore_object.h
++++ b/Include/internal/pycore_object.h
+@@ -186,7 +186,7 @@
+ // Mark an object as supporting deferred reference counting. This is a no-op
+ // in the default (with GIL) build. Objects that use deferred reference
+ // counting should be tracked by the GC so that they are eventually collected.
+-extern void _PyObject_SetDeferredRefcount(PyObject *op);
++extern void _PyObject_SetDeferredRefcount(PyObject *op) _Py_P2_HUB_RESIDENT;
+ 
+ static inline int
+ _PyObject_HasDeferredRefcount(PyObject *op)
+@@ -680,7 +680,7 @@
+     );
+ }
+ 
+-void _PyObject_GC_Link(PyObject *op);
++void _PyObject_GC_Link(PyObject *op) _Py_P2_INIT_OVERLAY;
+ 
+ // Usage: assert(_Py_CheckSlotResult(obj, "__getitem__", result != NULL));
+ extern int _Py_CheckSlotResult(
+@@ -693,7 +693,7 @@
+     return (type->tp_weaklistoffset != 0);
+ }
+ 
+-extern PyObject* _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems);
++extern PyObject* _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems) _Py_P2_INIT_OVERLAY;
+ extern PyObject *_PyType_NewManagedObject(PyTypeObject *type);
+ 
+ extern PyTypeObject* _PyType_CalculateMetaclass(PyTypeObject *, PyObject *);
+@@ -701,7 +701,7 @@
+ extern PyObject* _PyType_GetTextSignatureFromInternalDoc(const char *, const char *, int);
+ extern int _PyObject_SetAttributeErrorContext(PyObject *v, PyObject* name);
+ 
+-void _PyObject_InitInlineValues(PyObject *obj, PyTypeObject *tp);
++void _PyObject_InitInlineValues(PyObject *obj, PyTypeObject *tp) _Py_P2_INIT_OVERLAY;
+ extern int _PyObject_StoreInstanceAttribute(PyObject *obj,
+                                             PyObject *name, PyObject *value);
+ extern bool _PyObject_TryGetInstanceAttribute(PyObject *obj, PyObject *name,
+diff --git a/Include/internal/pycore_pyhash.h b/Include/internal/pycore_pyhash.h
+--- a/Include/internal/pycore_pyhash.h
++++ b/Include/internal/pycore_pyhash.h
+@@ -21,7 +21,7 @@
+ }
+ 
+ // Export for '_datetime' shared extension
+-PyAPI_FUNC(Py_hash_t) _Py_HashBytes(const void*, Py_ssize_t);
++PyAPI_FUNC(Py_hash_t) _Py_HashBytes(const void*, Py_ssize_t) _Py_P2_INIT_OVERLAY;
+ 
+ /* Hash secret
+  *
+diff --git a/Include/internal/pycore_typeobject.h b/Include/internal/pycore_typeobject.h
+--- a/Include/internal/pycore_typeobject.h
++++ b/Include/internal/pycore_typeobject.h
+@@ -168,7 +168,7 @@
+     PyTypeObject *type);
+ extern managed_static_type_state * _PyStaticType_GetState(
+     PyInterpreterState *interp,
+-    PyTypeObject *type);
++    PyTypeObject *type) _Py_P2_INIT_OVERLAY;
+ 
+ // Export for '_datetime' shared extension.
+ PyAPI_FUNC(int) _PyStaticType_InitForExtension(
+diff --git a/Include/internal/pycore_unicodeobject.h b/Include/internal/pycore_unicodeobject.h
+--- a/Include/internal/pycore_unicodeobject.h
++++ b/Include/internal/pycore_unicodeobject.h
+@@ -282,7 +282,7 @@
+ // All these are "ref-neutral", like the public PyUnicode_InternInPlace.
+ 
+ // Explicit interning routines:
+-PyAPI_FUNC(void) _PyUnicode_InternMortal(PyInterpreterState *interp, PyObject **);
++PyAPI_FUNC(void) _PyUnicode_InternMortal(PyInterpreterState *interp, PyObject **) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(void) _PyUnicode_InternImmortal(PyInterpreterState *interp, PyObject **);
+ // Left here to help backporting:
+ PyAPI_FUNC(void) _PyUnicode_InternInPlace(PyInterpreterState *interp, PyObject **p);
+diff --git a/Include/longobject.h b/Include/longobject.h
+--- a/Include/longobject.h
++++ b/Include/longobject.h
+@@ -14,7 +14,7 @@
+ #define PyLong_CheckExact(op) Py_IS_TYPE((op), &PyLong_Type)
+ 
+ PyAPI_FUNC(PyObject *) PyLong_FromLong(long);
+-PyAPI_FUNC(PyObject *) PyLong_FromUnsignedLong(unsigned long);
++PyAPI_FUNC(PyObject *) PyLong_FromUnsignedLong(unsigned long) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyLong_FromSize_t(size_t);
+ PyAPI_FUNC(PyObject *) PyLong_FromSsize_t(Py_ssize_t);
+ PyAPI_FUNC(PyObject *) PyLong_FromDouble(double);
+@@ -84,7 +84,7 @@
+ #endif /* SIZEOF_VOID_P */
+ 
+ PyAPI_FUNC(double) PyLong_AsDouble(PyObject *);
+-PyAPI_FUNC(PyObject *) PyLong_FromVoidPtr(void *);
++PyAPI_FUNC(PyObject *) PyLong_FromVoidPtr(void *) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(void *) PyLong_AsVoidPtr(PyObject *);
+ 
+ PyAPI_FUNC(PyObject *) PyLong_FromLongLong(long long);
+diff --git a/Include/methodobject.h b/Include/methodobject.h
+--- a/Include/methodobject.h
++++ b/Include/methodobject.h
+@@ -77,7 +77,7 @@
+ #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 >= 0x03090000
+ #define PyCFunction_NewEx(ML, SELF, MOD) PyCMethod_New((ML), (SELF), (MOD), NULL)
+ PyAPI_FUNC(PyObject *) PyCMethod_New(PyMethodDef *, PyObject *,
+-                                     PyObject *, PyTypeObject *);
++                                     PyObject *, PyTypeObject *) _Py_P2_INIT_OVERLAY;
+ #endif
+ 
+ 
+diff --git a/Include/object.h b/Include/object.h
+--- a/Include/object.h
++++ b/Include/object.h
+@@ -552,7 +552,7 @@
+ PyAPI_FUNC(unsigned long) PyType_GetFlags(PyTypeObject*);
+ 
+ PyAPI_FUNC(int) PyType_Ready(PyTypeObject *) _Py_P2_INIT_OVERLAY;
+-PyAPI_FUNC(PyObject *) PyType_GenericAlloc(PyTypeObject *, Py_ssize_t);
++PyAPI_FUNC(PyObject *) PyType_GenericAlloc(PyTypeObject *, Py_ssize_t) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyType_GenericNew(PyTypeObject *,
+                                                PyObject *, PyObject *);
+ PyAPI_FUNC(unsigned int) PyType_ClearCache(void);
+@@ -587,7 +587,7 @@
+ #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 >= 0x03030000
+ PyAPI_FUNC(int) PyObject_GenericSetDict(PyObject *, PyObject *, void *);
+ #endif
+-PyAPI_FUNC(Py_hash_t) PyObject_Hash(PyObject *);
++PyAPI_FUNC(Py_hash_t) PyObject_Hash(PyObject *) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(Py_hash_t) PyObject_HashNotImplemented(PyObject *);
+ PyAPI_FUNC(int) PyObject_IsTrue(PyObject *);
+ PyAPI_FUNC(int) PyObject_Not(PyObject *);
+diff --git a/Include/objimpl.h b/Include/objimpl.h
+--- a/Include/objimpl.h
++++ b/Include/objimpl.h
+@@ -162,8 +162,8 @@
+ 
+ 
+ 
+-PyAPI_FUNC(PyObject *) _PyObject_GC_New(PyTypeObject *);
+-PyAPI_FUNC(PyVarObject *) _PyObject_GC_NewVar(PyTypeObject *, Py_ssize_t);
++PyAPI_FUNC(PyObject *) _PyObject_GC_New(PyTypeObject *) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyVarObject *) _PyObject_GC_NewVar(PyTypeObject *, Py_ssize_t) _Py_P2_INIT_OVERLAY;
+ 
+ /* Tell the GC to track this object.
+  *
+diff --git a/Include/tupleobject.h b/Include/tupleobject.h
+--- a/Include/tupleobject.h
++++ b/Include/tupleobject.h
+@@ -27,12 +27,12 @@
+                  PyType_FastSubclass(Py_TYPE(op), Py_TPFLAGS_TUPLE_SUBCLASS)
+ #define PyTuple_CheckExact(op) Py_IS_TYPE((op), &PyTuple_Type)
+ 
+-PyAPI_FUNC(PyObject *) PyTuple_New(Py_ssize_t size);
++PyAPI_FUNC(PyObject *) PyTuple_New(Py_ssize_t size) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(Py_ssize_t) PyTuple_Size(PyObject *);
+ PyAPI_FUNC(PyObject *) PyTuple_GetItem(PyObject *, Py_ssize_t);
+ PyAPI_FUNC(int) PyTuple_SetItem(PyObject *, Py_ssize_t, PyObject *);
+ PyAPI_FUNC(PyObject *) PyTuple_GetSlice(PyObject *, Py_ssize_t, Py_ssize_t);
+-PyAPI_FUNC(PyObject *) PyTuple_Pack(Py_ssize_t, ...);
++PyAPI_FUNC(PyObject *) PyTuple_Pack(Py_ssize_t, ...) _Py_P2_INIT_OVERLAY;
+ 
+ #ifndef Py_LIMITED_API
+ #  define Py_CPYTHON_TUPLEOBJECT_H
+diff --git a/Include/unicodeobject.h b/Include/unicodeobject.h
+--- a/Include/unicodeobject.h
++++ b/Include/unicodeobject.h
+@@ -128,7 +128,7 @@
+    UTF-8 encoded bytes.  The size is determined with strlen(). */
+ PyAPI_FUNC(PyObject*) PyUnicode_FromString(
+     const char *u              /* UTF-8 encoded string */
+-    );
++    ) _Py_P2_INIT_OVERLAY;
+ 
+ #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 >= 0x03030000
+ PyAPI_FUNC(PyObject*) PyUnicode_Substring(
+@@ -246,7 +246,7 @@
+ PyAPI_FUNC(void) PyUnicode_InternInPlace(PyObject **);
+ PyAPI_FUNC(PyObject *) PyUnicode_InternFromString(
+     const char *u              /* UTF-8 encoded string */
+-    );
++    ) _Py_P2_INIT_OVERLAY;
+ 
+ /* --- wchar_t support for platforms which support it --------------------- */
+ 
+@@ -437,7 +437,7 @@
+     Py_ssize_t length,          /* size of string */
+     const char *errors,         /* error handling */
+     Py_ssize_t *consumed        /* bytes consumed */
+-    );
++    ) _Py_P2_INIT_OVERLAY;
+ 
+ PyAPI_FUNC(PyObject*) PyUnicode_AsUTF8String(
+     PyObject *unicode           /* Unicode object */
+diff --git a/Include/weakrefobject.h b/Include/weakrefobject.h
+--- a/Include/weakrefobject.h
++++ b/Include/weakrefobject.h
+@@ -24,7 +24,7 @@
+ 
+ 
+ PyAPI_FUNC(PyObject *) PyWeakref_NewRef(PyObject *ob,
+-                                        PyObject *callback);
++                                        PyObject *callback) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyWeakref_NewProxy(PyObject *ob,
+                                           PyObject *callback);
+ Py_DEPRECATED(3.13) PyAPI_FUNC(PyObject *) PyWeakref_GetObject(PyObject *ref);
+diff --git a/Objects/descrobject.c b/Objects/descrobject.c
+--- a/Objects/descrobject.c
++++ b/Objects/descrobject.c
+@@ -902,7 +902,7 @@
+     0,                                          /* tp_descr_set */
+ };
+ 
+-static PyDescrObject *
++_Py_P2_INIT_OVERLAY static PyDescrObject *
+ descr_new(PyTypeObject *descrtype, PyTypeObject *type, const char *name)
+ {
+     PyDescrObject *descr;
+@@ -922,7 +922,7 @@
+     return descr;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDescr_NewMethod(PyTypeObject *type, PyMethodDef *method)
+ {
+     /* Figure out correct vectorcall function to use */
+@@ -968,7 +968,7 @@
+     return (PyObject *)descr;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDescr_NewClassMethod(PyTypeObject *type, PyMethodDef *method)
+ {
+     PyMethodDescrObject *descr;
+@@ -980,7 +980,7 @@
+     return (PyObject *)descr;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDescr_NewMember(PyTypeObject *type, PyMemberDef *member)
+ {
+     PyMemberDescrObject *descr;
+@@ -998,7 +998,7 @@
+     return (PyObject *)descr;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDescr_NewGetSet(PyTypeObject *type, PyGetSetDef *getset)
+ {
+     PyGetSetDescrObject *descr;
+@@ -1010,7 +1010,7 @@
+     return (PyObject *)descr;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDescr_NewWrapper(PyTypeObject *type, struct wrapperbase *base, void *wrapped)
+ {
+     PyWrapperDescrObject *descr;
+diff --git a/Objects/dictobject.c b/Objects/dictobject.c
+--- a/Objects/dictobject.c
++++ b/Objects/dictobject.c
+@@ -377,14 +377,14 @@
+ 
+ */
+ 
+-static int dictresize(PyInterpreterState *interp, PyDictObject *mp,
++_Py_P2_INIT_OVERLAY static int dictresize(PyInterpreterState *interp, PyDictObject *mp,
+                       uint8_t log_newsize, int unicode);
+ 
+ static PyObject* dict_iter(PyObject *dict);
+ 
+ static int
+ setitem_lock_held(PyDictObject *mp, PyObject *key, PyObject *value);
+-static int
++_Py_P2_INIT_OVERLAY static int
+ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_value,
+                     PyObject **result, int incref_result);
+ 
+@@ -456,7 +456,7 @@
+ 
+ #define DK_MASK(dk) (DK_SIZE(dk)-1)
+ 
+-static void free_keys_object(PyDictKeysObject *keys, bool use_qsbr);
++_Py_P2_INIT_OVERLAY static void free_keys_object(PyDictKeysObject *keys, bool use_qsbr);
+ 
+ /* PyDictKeysObject has refcounts like PyObject does, so we have the
+    following two functions to mirror what Py_INCREF() and Py_DECREF() do.
+@@ -782,7 +782,7 @@
+ }
+ 
+ 
+-static PyDictKeysObject*
++_Py_P2_INIT_OVERLAY static PyDictKeysObject*
+ new_keys_object(PyInterpreterState *interp, uint8_t log2_size, bool unicode)
+ {
+     PyDictKeysObject *dk;
+@@ -843,7 +843,7 @@
+     return dk;
+ }
+ 
+-static void
++_Py_P2_INIT_OVERLAY static void
+ free_keys_object(PyDictKeysObject *keys, bool use_qsbr)
+ {
+ #ifdef Py_GIL_DISABLED
+@@ -907,7 +907,7 @@
+ }
+ 
+ /* Consumes a reference to the keys object */
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ new_dict(PyInterpreterState *interp,
+          PyDictKeysObject *keys, PyDictValues *values,
+          Py_ssize_t used, int free_values_on_failure)
+@@ -1018,7 +1018,7 @@
+     return keys;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDict_New(void)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+@@ -1142,7 +1142,7 @@
+     return 0;
+ }
+ 
+-static Py_ssize_t _Py_HOT_FUNCTION
++_Py_P2_INIT_OVERLAY static Py_ssize_t _Py_HOT_FUNCTION
+ unicodekeys_lookup_unicode(PyDictKeysObject* dk, PyObject *key, Py_hash_t hash)
+ {
+     return do_lookup(NULL, dk, key, hash, compare_unicode_unicode);
+@@ -1229,7 +1229,7 @@
+ comparison raises an exception.
+ When the key isn't found a DKIX_EMPTY is returned.
+ */
+-Py_ssize_t
++_Py_P2_INIT_OVERLAY Py_ssize_t
+ _Py_dict_lookup(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject **value_addr)
+ {
+     PyDictKeysObject *dk;
+@@ -1653,7 +1653,7 @@
+ /* Internal function to find slot for an item from its hash
+    when it is known that the key is not present in the dict.
+  */
+-static Py_ssize_t
++_Py_P2_INIT_OVERLAY static Py_ssize_t
+ find_empty_slot(PyDictKeysObject *keys, Py_hash_t hash)
+ {
+     assert(keys != NULL);
+@@ -1675,7 +1675,7 @@
+     return dictresize(interp, mp, calculate_log2_keysize(GROWTH_RATE(mp)), unicode);
+ }
+ 
+-static inline int
++_Py_P2_INIT_OVERLAY static inline int
+ insert_combined_dict(PyInterpreterState *interp, PyDictObject *mp,
+                      Py_hash_t hash, PyObject *key, PyObject *value)
+ {
+@@ -1775,7 +1775,7 @@
+ Returns -1 if an error occurred, or 0 on success.
+ Consumes key and value references.
+ */
+-static int
++_Py_P2_INIT_OVERLAY static int
+ insertdict(PyInterpreterState *interp, PyDictObject *mp,
+            PyObject *key, Py_hash_t hash, PyObject *value)
+ {
+@@ -1850,7 +1850,7 @@
+ 
+ // Same as insertdict but specialized for ma_keys == Py_EMPTY_KEYS.
+ // Consumes key and value references.
+-static int
++_Py_P2_INIT_OVERLAY static int
+ insert_to_emptydict(PyInterpreterState *interp, PyDictObject *mp,
+                     PyObject *key, Py_hash_t hash, PyObject *value)
+ {
+@@ -1917,7 +1917,7 @@
+     }
+ }
+ 
+-static void
++_Py_P2_INIT_OVERLAY static void
+ build_indices_unicode(PyDictKeysObject *keys, PyDictUnicodeEntry *ep, Py_ssize_t n)
+ {
+     size_t mask = DK_MASK(keys);
+@@ -1947,7 +1947,7 @@
+  - Unicode combined -> Unicode combined or Generic
+  - Generic -> Generic
+ */
+-static int
++_Py_P2_INIT_OVERLAY static int
+ dictresize(PyInterpreterState *interp, PyDictObject *mp,
+            uint8_t log2_newsize, int unicode)
+ {
+@@ -2480,7 +2480,7 @@
+ }
+ 
+ /* Consumes references to key and value */
+-static int
++_Py_P2_INIT_OVERLAY static int
+ setitem_take2_lock_held(PyDictObject *mp, PyObject *key, PyObject *value)
+ {
+     ASSERT_DICT_LOCKED(mp);
+@@ -2504,7 +2504,7 @@
+     return insertdict(interp, mp, key, hash, value);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyDict_SetItem_Take2(PyDictObject *mp, PyObject *key, PyObject *value)
+ {
+     int res;
+@@ -2520,7 +2520,7 @@
+  * and occasionally replace a value -- but you can't insert new keys or
+  * remove them.
+  */
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_SetItem(PyObject *op, PyObject *key, PyObject *value)
+ {
+     if (!PyDict_Check(op)) {
+@@ -4206,7 +4206,7 @@
+     return val;
+ }
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ dict_setdefault_ref_lock_held(PyObject *d, PyObject *key, PyObject *default_value,
+                     PyObject **result, int incref_result)
+ {
+@@ -4323,7 +4323,7 @@
+     return -1;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_SetDefaultRef(PyObject *d, PyObject *key, PyObject *default_value,
+                      PyObject **result)
+ {
+@@ -4655,7 +4655,7 @@
+ };
+ 
+ /* Return 1 if `key` is in dict `op`, 0 if not, and -1 on error. */
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_Contains(PyObject *op, PyObject *key)
+ {
+     Py_hash_t hash = _PyObject_HashFast(key);
+@@ -6623,7 +6623,7 @@
+ 
+ /* Returns NULL if cannot allocate a new PyDictKeysObject,
+    but does not set an error */
+-PyDictKeysObject *
++_Py_P2_INIT_OVERLAY PyDictKeysObject *
+ _PyDict_NewKeysForClass(void)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+@@ -6641,7 +6641,7 @@
+     return keys;
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _PyObject_InitInlineValues(PyObject *obj, PyTypeObject *tp)
+ {
+     assert(tp->tp_flags & Py_TPFLAGS_HEAPTYPE);
+@@ -7416,7 +7416,7 @@
+     Py_UNREACHABLE();
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _PyDict_SendEvent(int watcher_bits,
+                   PyDict_WatchEvent event,
+                   PyDictObject *mp,
+diff --git a/Objects/funcobject.c b/Objects/funcobject.c
+--- a/Objects/funcobject.c
++++ b/Objects/funcobject.c
+@@ -1497,7 +1497,7 @@
+     PyObject_GC_Del,                            /* tp_free */
+ };
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyStaticMethod_New(PyObject *callable)
+ {
+     staticmethod *sm = (staticmethod *)
+diff --git a/Objects/longobject.c b/Objects/longobject.c
+--- a/Objects/longobject.c
++++ b/Objects/longobject.c
+@@ -136,7 +136,7 @@
+ #define MAX_LONG_DIGITS \
+     ((PY_SSIZE_T_MAX - offsetof(PyLongObject, long_value.ob_digit))/sizeof(digit))
+ 
+-PyLongObject *
++_Py_P2_INIT_OVERLAY PyLongObject *
+ _PyLong_New(Py_ssize_t size)
+ {
+     assert(size >= 0);
+@@ -355,7 +355,7 @@
+ 
+ /* Create a new int object from a C unsigned long int */
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyLong_FromUnsignedLong(unsigned long ival)
+ {
+     PYLONG_FROM_UINT(unsigned long, ival);
+@@ -1333,7 +1333,7 @@
+ 
+ /* Create a new int object from a C pointer */
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyLong_FromVoidPtr(void *p)
+ {
+ #if SIZEOF_VOID_P <= SIZEOF_LONG
+@@ -3602,7 +3602,7 @@
+     Py_TYPE(self)->tp_free(self);
+ }
+ 
+-static Py_hash_t
++_Py_P2_INIT_OVERLAY static Py_hash_t
+ long_hash(PyLongObject *v)
+ {
+     Py_uhash_t x;
+diff --git a/Objects/methodobject.c b/Objects/methodobject.c
+--- a/Objects/methodobject.c
++++ b/Objects/methodobject.c
+@@ -41,7 +41,7 @@
+     return PyCMethod_New(ml, self, module, NULL);
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyCMethod_New(PyMethodDef *ml, PyObject *self, PyObject *module, PyTypeObject *cls)
+ {
+     /* Figure out correct vectorcall function to use */
+diff --git a/Objects/object.c b/Objects/object.c
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -1025,7 +1025,7 @@
+     return -1;
+ }
+ 
+-Py_hash_t
++_Py_P2_INIT_OVERLAY Py_hash_t
+ PyObject_Hash(PyObject *v)
+ {
+     PyTypeObject *tp = Py_TYPE(v);
+@@ -2404,7 +2404,7 @@
+     }
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _Py_NewReference(PyObject *op)
+ {
+ #ifdef Py_REF_DEBUG
+@@ -2413,7 +2413,7 @@
+     new_reference(op);
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _Py_NewReferenceNoTotal(PyObject *op)
+ {
+     new_reference(op);
+@@ -2447,7 +2447,7 @@
+     _Py_SetImmortalUntracked(op);
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ _PyObject_SetDeferredRefcount(PyObject *op)
+ {
+ #ifdef Py_GIL_DISABLED
+diff --git a/Objects/tupleobject.c b/Objects/tupleobject.c
+--- a/Objects/tupleobject.c
++++ b/Objects/tupleobject.c
+@@ -31,7 +31,7 @@
+    this function must not be called with size == 0 (unless from PyTuple_New()
+    which wraps this function).
+ */
+-static PyTupleObject *
++_Py_P2_INIT_OVERLAY static PyTupleObject *
+ tuple_alloc(Py_ssize_t size)
+ {
+     if (size < 0) {
+@@ -66,7 +66,7 @@
+     return (PyObject *)&_Py_SINGLETON(tuple_empty);
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyTuple_New(Py_ssize_t size)
+ {
+     PyTupleObject *op;
+@@ -151,7 +151,7 @@
+     _PyObject_GC_UNTRACK(op);
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyTuple_Pack(Py_ssize_t n, ...)
+ {
+     Py_ssize_t i;
+diff --git a/Objects/typeobject.c b/Objects/typeobject.c
+--- a/Objects/typeobject.c
++++ b/Objects/typeobject.c
+@@ -189,7 +189,7 @@
+ }
+ 
+ /* For static types we store some state in an array on each interpreter. */
+-managed_static_type_state *
++_Py_P2_INIT_OVERLAY managed_static_type_state *
+ _PyStaticType_GetState(PyInterpreterState *interp, PyTypeObject *self)
+ {
+     assert(self->tp_flags & _Py_TPFLAGS_STATIC_BUILTIN);
+@@ -2017,7 +2017,7 @@
+     return obj;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ _PyType_AllocNoTrack(PyTypeObject *type, Py_ssize_t nitems)
+ {
+     PyObject *obj;
+@@ -2060,7 +2060,7 @@
+     return obj;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyType_GenericAlloc(PyTypeObject *type, Py_ssize_t nitems)
+ {
+     PyObject *obj = _PyType_AllocNoTrack(type, nitems);
+diff --git a/Objects/unicodeobject.c b/Objects/unicodeobject.c
+--- a/Objects/unicodeobject.c
++++ b/Objects/unicodeobject.c
+@@ -195,7 +195,7 @@
+ static PyObject *
+ unicode_encode_utf8(PyObject *unicode, _Py_error_handler error_handler,
+                     const char *errors);
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ unicode_decode_utf8(const char *s, Py_ssize_t size,
+                     _Py_error_handler error_handler, const char *errors,
+                     Py_ssize_t *consumed);
+@@ -255,7 +255,7 @@
+     return _Py_hashtable_len(INTERNED_STRINGS) + count;
+ }
+ 
+-static Py_hash_t unicode_hash(PyObject *);
++_Py_P2_INIT_OVERLAY static Py_hash_t unicode_hash(PyObject *);
+ static int unicode_compare_eq(PyObject *, PyObject *);
+ 
+ static Py_uhash_t
+@@ -1271,7 +1271,7 @@
+ #endif
+ 
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyUnicode_New(Py_ssize_t size, Py_UCS4 maxchar)
+ {
+     /* Optimization for empty strings */
+@@ -2030,7 +2030,7 @@
+     return unicode_get_empty();
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyUnicode_FromString(const char *u)
+ {
+     size_t size = strlen(u);
+@@ -4830,7 +4830,7 @@
+ # error C 'size_t' size should be either 4 or 8!
+ #endif
+ 
+-static Py_ssize_t
++_Py_P2_INIT_OVERLAY static Py_ssize_t
+ ascii_decode(const char *start, const char *end, Py_UCS1 *dest)
+ {
+     const char *p = start;
+@@ -4884,7 +4884,7 @@
+     return p - start;
+ }
+ 
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ unicode_decode_utf8(const char *s, Py_ssize_t size,
+                     _Py_error_handler error_handler, const char *errors,
+                     Py_ssize_t *consumed)
+@@ -5034,7 +5034,7 @@
+ }
+ 
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyUnicode_DecodeUTF8Stateful(const char *s,
+                              Py_ssize_t size,
+                              const char *errors,
+@@ -11448,7 +11448,7 @@
+ 
+ /* Believe it or not, this produces the same value for ASCII strings
+    as bytes_hash(). */
+-static Py_hash_t
++_Py_P2_INIT_OVERLAY static Py_hash_t
+ unicode_hash(PyObject *self)
+ {
+     Py_uhash_t x;  /* Unsigned for defined overflow behavior. */
+@@ -15115,7 +15115,7 @@
+     _Py_SetImmortal(s);
+ }
+ 
+-static /* non-null */ PyObject*
++_Py_P2_INIT_OVERLAY static /* non-null */ PyObject*
+ intern_common(PyInterpreterState *interp, PyObject *s /* stolen */,
+               bool immortalize)
+ {
+@@ -15253,7 +15253,7 @@
+     assert(*p);
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _PyUnicode_InternMortal(PyInterpreterState *interp, PyObject **p)
+ {
+     *p = intern_common(interp, *p, 0);
+@@ -15284,7 +15284,7 @@
+     _PyUnicode_InternImmortal(interp, p);
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyUnicode_InternFromString(const char *cp)
+ {
+     PyObject *s = PyUnicode_FromString(cp);
+diff --git a/Objects/weakrefobject.c b/Objects/weakrefobject.c
+--- a/Objects/weakrefobject.c
++++ b/Objects/weakrefobject.c
+@@ -268,7 +268,7 @@
+  * shared references exist and to determine the back link for newly
+  * inserted references.
+  */
+-static void
++_Py_P2_INIT_OVERLAY static void
+ get_basic_refs(PyWeakReference *head,
+                PyWeakReference **refp, PyWeakReference **proxyp)
+ {
+@@ -366,7 +366,7 @@
+ }
+ 
+ /* Insert `newref` in the appropriate position in `list` */
+-static void
++_Py_P2_INIT_OVERLAY static void
+ insert_weakref(PyWeakReference *newref, PyWeakReference **list)
+ {
+     PyWeakReference *ref, *proxy;
+@@ -391,7 +391,7 @@
+     }
+ }
+ 
+-static PyWeakReference *
++_Py_P2_INIT_OVERLAY static PyWeakReference *
+ allocate_weakref(PyTypeObject *type, PyObject *obj, PyObject *callback)
+ {
+     PyWeakReference *newref = (PyWeakReference *) type->tp_alloc(type, 0);
+@@ -402,7 +402,7 @@
+     return newref;
+ }
+ 
+-static PyWeakReference *
++_Py_P2_INIT_OVERLAY static PyWeakReference *
+ get_or_create_weakref(PyTypeObject *type, PyObject *obj, PyObject *callback)
+ {
+     if (!_PyType_SUPPORTS_WEAKREFS(Py_TYPE(obj))) {
+@@ -910,7 +910,7 @@
+     proxy_iternext,                     /* tp_iternext */
+ };
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyWeakref_NewRef(PyObject *ob, PyObject *callback)
+ {
+     return (PyObject *)get_or_create_weakref(&_PyWeakref_RefType, ob,
+diff --git a/Python/gc.c b/Python/gc.c
+--- a/Python/gc.c
++++ b/Python/gc.c
+@@ -1790,13 +1790,13 @@
+     }
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyObject_IS_GC(PyObject *obj)
+ {
+     return _PyObject_IS_GC(obj);
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _Py_ScheduleGC(PyThreadState *tstate)
+ {
+     if (!_Py_eval_breaker_bit_is_set(tstate, _PY_GC_SCHEDULED_BIT))
+@@ -1805,7 +1805,7 @@
+     }
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _PyObject_GC_Link(PyObject *op)
+ {
+     PyGC_Head *gc = AS_GC(op);
+@@ -1837,7 +1837,7 @@
+     gc_collect_main(tstate, GENERATION_AUTO, _Py_GC_REASON_HEAP);
+ }
+ 
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ gc_alloc(PyTypeObject *tp, size_t basicsize, size_t presize)
+ {
+     PyThreadState *tstate = _PyThreadState_GET();
+@@ -1857,7 +1857,7 @@
+ }
+ 
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ _PyObject_GC_New(PyTypeObject *tp)
+ {
+     size_t presize = _PyType_PreHeaderSize(tp);
+@@ -1873,7 +1873,7 @@
+     return op;
+ }
+ 
+-PyVarObject *
++_Py_P2_INIT_OVERLAY PyVarObject *
+ _PyObject_GC_NewVar(PyTypeObject *tp, Py_ssize_t nitems)
+ {
+     PyVarObject *op;
+diff --git a/Python/lock.c b/Python/lock.c
+--- a/Python/lock.c
++++ b/Python/lock.c
+@@ -155,7 +155,7 @@
+     _Py_atomic_store_uint8(&m->_bits, v);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyMutex_TryUnlock(PyMutex *m)
+ {
+     uint8_t v = _Py_atomic_load_uint8(&m->_bits);
+@@ -576,14 +576,14 @@
+ }
+ 
+ #undef PyMutex_Lock
+-void
++_Py_P2_INIT_OVERLAY void
+ PyMutex_Lock(PyMutex *m)
+ {
+     _PyMutex_LockTimed(m, -1, _PY_LOCK_DETACH);
+ }
+ 
+ #undef PyMutex_Unlock
+-void
++_Py_P2_INIT_OVERLAY void
+ PyMutex_Unlock(PyMutex *m)
+ {
+     if (_PyMutex_TryUnlock(m) < 0) {
+diff --git a/Python/pyhash.c b/Python/pyhash.c
+--- a/Python/pyhash.c
++++ b/Python/pyhash.c
+@@ -145,7 +145,7 @@
+     return Py_HashPointer(obj);
+ }
+ 
+-Py_hash_t
++_Py_P2_INIT_OVERLAY Py_hash_t
+ _Py_HashBytes(const void *src, Py_ssize_t len)
+ {
+     Py_hash_t x;
+@@ -237,7 +237,7 @@
+ /* **************************************************************************
+  * Modified Fowler-Noll-Vo (FNV) hash function
+  */
+-static Py_hash_t
++_Py_P2_INIT_OVERLAY static Py_hash_t
+ fnv(const void *src, Py_ssize_t len)
+ {
+     const unsigned char *p = src;
+diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -43,7 +43,7 @@
+ #endif
+ 
+ #if defined(__NuttX__) && defined(__propeller2__)
+-#  pragma clang attribute push(__attribute__((p2_hub_overlay(7))), \
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
+                                apply_to = function)
+ #endif
+ 

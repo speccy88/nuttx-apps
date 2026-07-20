@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 18 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: trace GIL and static type initialization
+
+Add P2-only fixed-text and numeric progress markers around GIL creation,
+the complete core-type phase, and every static builtin type initialization.
+The per-index BEFORE and AFTER records identify the exact call that fails to
+return without printing object names or addresses.  Other targets compile
+the diagnostic out.
+---
+diff --git a/Objects/object.c b/Objects/object.c
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -2340,10 +2340,23 @@
+ _Py_P2_INIT_OVERLAY PyStatus
+ _PyTypes_InitTypes(PyInterpreterState *interp)
+ {
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:INIT:TYPES:BEGIN:N=%u\n",
++           (unsigned int)Py_ARRAY_LENGTH(static_types));
++#endif
++
+     // All other static types (unless initialized elsewhere)
+     for (size_t i=0; i < Py_ARRAY_LENGTH(static_types); i++) {
+         PyTypeObject *type = static_types[i];
+-        if (_PyStaticType_InitBuiltin(interp, type) < 0) {
++#if defined(__NuttX__) && defined(__propeller2__)
++        printf("P2PY:INIT:TYPE:I=%u:BEFORE\n", (unsigned int)i);
++#endif
++        int result = _PyStaticType_InitBuiltin(interp, type);
++#if defined(__NuttX__) && defined(__propeller2__)
++        printf("P2PY:INIT:TYPE:I=%u:AFTER:R=%d\n",
++               (unsigned int)i, result);
++#endif
++        if (result < 0) {
+             return _PyStatus_ERR("Can't initialize builtin type");
+         }
+         if (type == &PyType_Type) {
+@@ -2357,6 +2370,11 @@
+     if (_Py_initialize_generic(interp) < 0) {
+         return _PyStatus_ERR("Can't initialize generic types");
+     }
++
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:INIT:TYPES:PASS:N=%u\n",
++           (unsigned int)Py_ARRAY_LENGTH(static_types));
++#endif
+ 
+     return _PyStatus_OK();
+ }
+diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -633,11 +633,17 @@
+ 
+     /* Auto-thread-state API */
+     _PyGILState_SetTstate(tstate);
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:INIT:GIL:TSTATE:PASS\n");
++#endif
+ 
+     int own_gil = (gil == PyInterpreterConfig_OWN_GIL);
+ 
+     /* Create the GIL and take it */
+     _PyEval_InitGIL(tstate, own_gil);
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:INIT:GIL:READY:PASS\n");
++#endif
+ }
+ 
+ static int
+@@ -739,6 +745,10 @@
+ {
+     PyStatus status;
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:INIT:PYCORE_TYPES:BEGIN\n");
++#endif
++
+     status = _PyTypes_InitTypes(interp);
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+@@ -787,6 +797,10 @@
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:INIT:PYCORE_TYPES:PASS\n");
++#endif
+ 
+     return _PyStatus_OK();
+ }
+

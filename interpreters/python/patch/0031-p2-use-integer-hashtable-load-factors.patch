@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: use integer hashtable load factors
+
+Express the one-half and one-tenth thresholds as exact integer predicates on
+P2, and compute the 10/3 rehash target with explicit overflow checks.  This
+keeps CPython's generic behavior unchanged while removing soft-float calls
+from the P2 hashtable path.
+---
+ Python/hashtable.c | 35 ++++++++++++++++++++++++++++++++---
+ 1 file changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/Python/hashtable.c b/Python/hashtable.c
+--- a/Python/hashtable.c
++++ b/Python/hashtable.c
+@@ -66,6 +66,18 @@
+ #define HASHTABLE_LOW 0.10
+ #define HASHTABLE_REHASH_FACTOR 2.0 / (HASHTABLE_LOW + HASHTABLE_HIGH)
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  define HASHTABLE_HIGH_EXCEEDED(ht) \
++    ((ht)->nentries > (ht)->nbuckets / 2)
++#  define HASHTABLE_LOW_REACHED(ht) \
++    ((ht)->nentries <= ((ht)->nbuckets - 1) / 10)
++#else
++#  define HASHTABLE_HIGH_EXCEEDED(ht) \
++    ((float)(ht)->nentries / (float)(ht)->nbuckets > HASHTABLE_HIGH)
++#  define HASHTABLE_LOW_REACHED(ht) \
++    ((float)(ht)->nentries / (float)(ht)->nbuckets < HASHTABLE_LOW)
++#endif
++
+ #define BUCKETS_HEAD(SLIST) \
+         ((_Py_hashtable_entry_t *)_Py_SLIST_HEAD(&(SLIST)))
+ #define TABLE_HEAD(HT, BUCKET) \
+@@ -221,7 +233,7 @@ _Py_hashtable_steal(_Py_hashtable_t *ht, const void *key)
+     void *value = entry->value;
+     ht->alloc.free(entry);
+ 
+-    if ((float)ht->nentries / (float)ht->nbuckets < HASHTABLE_LOW) {
++    if (HASHTABLE_LOW_REACHED(ht)) {
+         // Ignore failure: error cannot be reported to the caller
+         hashtable_rehash(ht);
+     }
+@@ -255,7 +267,7 @@ _Py_hashtable_set(_Py_hashtable_t *ht, const void *key, void *value)
+     entry->value = value;
+ 
+     ht->nentries++;
+-    if ((float)ht->nentries / (float)ht->nbuckets > HASHTABLE_HIGH) {
++    if (HASHTABLE_HIGH_EXCEEDED(ht)) {
+         if (hashtable_rehash(ht) < 0) {
+             ht->nentries--;
+             ht->alloc.free(entry);
+@@ -304,7 +316,26 @@ _Py_hashtable_foreach(_Py_hashtable_t *ht,
+ _Py_P2_HUB_RESIDENT static int
+ hashtable_rehash(_Py_hashtable_t *ht)
+ {
+-    size_t new_size = round_size((size_t)(ht->nentries * HASHTABLE_REHASH_FACTOR));
++    size_t new_size;
++#if defined(__NuttX__) && defined(__propeller2__)
++    size_t target_size;
++
++    /* HASHTABLE_REHASH_FACTOR is exactly 10/3.  Keep the P2 runtime out of
++       soft-float helpers and reject both scaling and bucket-size overflow. */
++    if (ht->nentries > SIZE_MAX / 10) {
++        return -1;
++    }
++    target_size = ht->nentries * 10 / 3;
++    if (target_size > (SIZE_MAX >> 1) + 1) {
++        return -1;
++    }
++    new_size = round_size(target_size);
++    if (new_size > SIZE_MAX / sizeof(ht->buckets[0])) {
++        return -1;
++    }
++#else
++    new_size = round_size((size_t)(ht->nentries * HASHTABLE_REHASH_FACTOR));
++#endif
+     if (new_size == ht->nbuckets) {
+         return 0;
+     }
+-- 
+2.50.1

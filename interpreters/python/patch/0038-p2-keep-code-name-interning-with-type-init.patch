@@ -1,0 +1,48 @@
+From 74f6961f88ff76d0c69ec2e8dd105a4fb24703d8 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 19:00:00 -0400
+Subject: [PATCH] p2: keep code name interning with type init
+
+The next frozen-code phase repeatedly left codeobject.c's automatic group F4
+for group 7 intern_common and restored F4 afterwards.  Keep the narrow
+208-byte intern_strings loop with the group-7 interning implementation.  Do
+not move recursive intern_constants until telemetry demonstrates that its
+larger closure belongs there.
+
+Group 7 only had 36 bytes free.  Evict the 448-byte
+managed_static_type_state_clear rollback/finalization helper, which is not on
+the successful startup path.  The two measured moves predict a group-7 size
+of 89,836 bytes (0x15eec), leaving 276 bytes in the 90,112-byte slot.  The
+post-link exact allowlist remains the authority for membership and fit.
+---
+ Objects/codeobject.c | 2 +-
+ Objects/typeobject.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Objects/codeobject.c b/Objects/codeobject.c
+--- a/Objects/codeobject.c
++++ b/Objects/codeobject.c
+@@ -134,7 +134,7 @@ should_intern_string(PyObject *o)
+ static PyObject *intern_one_constant(PyObject *op);
+ #endif
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ intern_strings(PyObject *tuple)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+diff --git a/Objects/typeobject.c b/Objects/typeobject.c
+--- a/Objects/typeobject.c
++++ b/Objects/typeobject.c
+@@ -269,7 +269,7 @@ managed_static_type_state_init(PyInterpreterState *interp, PyTypeObject *self,
+ 
+ /* Reset the type's per-interpreter state.
+    This basically undoes what managed_static_type_state_init() did. */
+-_Py_P2_INIT_OVERLAY static void
++static void
+ managed_static_type_state_clear(PyInterpreterState *interp, PyTypeObject *self,
+                                 int isbuiltin, int final)
+ {
+-- 
+2.50.1
+

@@ -1,0 +1,115 @@
+From 5ed082436863a140560586509af60339e1625d3e8 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 19:15:00 -0400
+Subject: [PATCH] p2: trace importlib bootstrap steps
+
+The latest hardware run reached _PyImport_InitCore but eventually reported
+"failed to initialize importlib".  Its traceback is too slow to be the first
+diagnostic signal on the P2 overlay build.
+
+Add P2/NuttX-only BEGIN, PASS, and FAIL markers around each fallible step in
+init_importlib: executing _frozen_importlib, retaining its module,
+bootstrapping _imp, publishing _imp, and calling importlib._install.  The
+markers follow the existing printf-based startup instrumentation and do not
+change control flow, ownership, or error propagation on any target.
+---
+ Python/import.c | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/Python/import.c b/Python/import.c
+--- a/Python/import.c
++++ b/Python/import.c
+@@ -3181,6 +3181,10 @@ init_importlib(PyThreadState *tstate, PyObject *sysmod)
+ {
+     assert(!_PyErr_Occurred(tstate));
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:IMPORTLIB:BEGIN\n");
++#endif
++
+     PyInterpreterState *interp = tstate->interp;
+     int verbose = _PyInterpreterState_GetConfig(interp)->verbose;
+ 
+@@ -3188,38 +3192,79 @@ init_importlib(PyThreadState *tstate, PyObject *sysmod)
+     if (verbose) {
+         PySys_FormatStderr("import _frozen_importlib # frozen\n");
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:IMPORTLIB:FROZEN:BEGIN\n");
++#endif
+     if (PyImport_ImportFrozenModule("_frozen_importlib") <= 0) {
++#if defined(__NuttX__) && defined(__propeller2__)
++        printf("P2PY:IMPORTLIB:FROZEN:FAIL\n");
++#endif
+         return -1;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:IMPORTLIB:FROZEN:PASS\n");
++    printf("P2PY:IMPORTLIB:ADD_MODULE_REF:BEGIN\n");
++#endif
+ 
+     PyObject *importlib = PyImport_AddModuleRef("_frozen_importlib");
+     if (importlib == NULL) {
++#if defined(__NuttX__) && defined(__propeller2__)
++        printf("P2PY:IMPORTLIB:ADD_MODULE_REF:FAIL\n");
++#endif
+         return -1;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:IMPORTLIB:ADD_MODULE_REF:PASS\n");
++#endif
+     IMPORTLIB(interp) = importlib;
+ 
+     // Import the _imp module
+     if (verbose) {
+         PySys_FormatStderr("import _imp # builtin\n");
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:IMPORTLIB:BOOTSTRAP_IMP:BEGIN\n");
++#endif
+     PyObject *imp_mod = bootstrap_imp(tstate);
+     if (imp_mod == NULL) {
++#if defined(__NuttX__) && defined(__propeller2__)
++        printf("P2PY:IMPORTLIB:BOOTSTRAP_IMP:FAIL\n");
++#endif
+         return -1;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:IMPORTLIB:BOOTSTRAP_IMP:PASS\n");
++    printf("P2PY:IMPORTLIB:SET_MODULE_STRING:BEGIN\n");
++#endif
+     if (_PyImport_SetModuleString("_imp", imp_mod) < 0) {
++#if defined(__NuttX__) && defined(__propeller2__)
++        printf("P2PY:IMPORTLIB:SET_MODULE_STRING:FAIL\n");
++#endif
+         Py_DECREF(imp_mod);
+         return -1;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:IMPORTLIB:SET_MODULE_STRING:PASS\n");
++    printf("P2PY:IMPORTLIB:INSTALL:BEGIN\n");
++#endif
+ 
+     // Install importlib as the implementation of import
+     PyObject *value = PyObject_CallMethod(importlib, "_install",
+                                           "OO", sysmod, imp_mod);
+     Py_DECREF(imp_mod);
+     if (value == NULL) {
++#if defined(__NuttX__) && defined(__propeller2__)
++        printf("P2PY:IMPORTLIB:INSTALL:FAIL\n");
++#endif
+         return -1;
+     }
+     Py_DECREF(value);
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:IMPORTLIB:INSTALL:PASS\n");
++    printf("P2PY:IMPORTLIB:PASS\n");
++#endif
++
+     assert(!_PyErr_Occurred(tstate));
+     return 0;
+ }
+-- 
+2.50.1
+

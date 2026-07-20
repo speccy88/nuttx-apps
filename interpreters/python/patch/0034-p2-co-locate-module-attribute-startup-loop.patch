@@ -1,0 +1,212 @@
+From 0d9fb5bd4d8ca6772ba1a72d89f273c7bf36dad8 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 18:01:00 -0400
+Subject: [PATCH] p2: co-locate module attribute startup loop
+
+Production telemetry after PYCORE_TYPES:PASS repeatedly sampled stub 0x39c
+(PyUnicode_New) while groups 7, 13e, 13c, 12c, d5, and d4 alternated.  This
+matches the module method installation loop: _add_methods_to_object creates a
+method, interns its name, resolves the module attribute path, and updates the
+module dictionary for every PyMethodDef entry.
+
+Pin the exact ten-function inner path to type-init group 7.  The measured
+linked bodies total 5,836 bytes.  Starting from the audited 83,980-byte group,
+the predicted result is 89,816 bytes in the 90,112-byte slot, leaving 296
+bytes.  The post-link residency verifier remains the hard authority for fit.
+---
+ Include/cpython/object.h         |  6 ++++--
+ Include/internal/pycore_dict.h   |  7 +++++--
+ Include/object.h                 |  6 +++---
+ Objects/dictobject.c             |  4 ++--
+ Objects/moduleobject.c           |  2 +-
+ Objects/object.c                 |  8 ++++----
+ Objects/typeobject.c             |  8 ++++----
+ 7 files changed, 23 insertions(+), 18 deletions(-)
+
+diff --git a/Include/cpython/object.h b/Include/cpython/object.h
+--- a/Include/cpython/object.h
++++ b/Include/cpython/object.h
+@@ -275,7 +275,8 @@ typedef struct _heaptypeobject {
+ 
+ PyAPI_FUNC(const char *) _PyType_Name(PyTypeObject *);
+ PyAPI_FUNC(PyObject *) _PyType_Lookup(PyTypeObject *, PyObject *);
+-PyAPI_FUNC(PyObject *) _PyType_LookupRef(PyTypeObject *, PyObject *);
++PyAPI_FUNC(PyObject *) _PyType_LookupRef(PyTypeObject *, PyObject *)
++    _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyType_GetDict(PyTypeObject *);
+ 
+ PyAPI_FUNC(int) PyObject_Print(PyObject *, FILE *, int);
+@@ -295,6 +296,7 @@ _PyObject_GenericGetAttrWithDict(PyObject *, PyObject *, PyObject *, int);
+ PyAPI_FUNC(int)
+ _PyObject_GenericSetAttrWithDict(PyObject *, PyObject *,
+-                                 PyObject *, PyObject *);
++                                 PyObject *, PyObject *)
++    _Py_P2_INIT_OVERLAY;
+ 
+ PyAPI_FUNC(PyObject *) _PyObject_FunctionStr(PyObject *);
+ 
+diff --git a/Include/internal/pycore_dict.h b/Include/internal/pycore_dict.h
+--- a/Include/internal/pycore_dict.h
++++ b/Include/internal/pycore_dict.h
+@@ -114,7 +114,8 @@ PyAPI_FUNC(PyObject *)_PyDict_LoadGlobal(PyDictObject *, PyDictObject *, PyObjec
+ 
+ /* Consumes references to key and value */
+ PyAPI_FUNC(int) _PyDict_SetItem_Take2(PyDictObject *op, PyObject *key, PyObject *value) _Py_P2_INIT_OVERLAY;
+-extern int _PyDict_SetItem_LockHeld(PyDictObject *dict, PyObject *name, PyObject *value);
++extern int _PyDict_SetItem_LockHeld(PyDictObject *dict, PyObject *name,
++                                    PyObject *value) _Py_P2_INIT_OVERLAY;
+ // Export for '_asyncio' shared extension
+ PyAPI_FUNC(int) _PyDict_SetItem_KnownHash_LockHeld(PyDictObject *mp, PyObject *key,
+                                                    PyObject *value, Py_hash_t hash)
+@@ -125,7 +126,9 @@ extern int _PyDict_GetItemRef_KnownHash(PyDictObject *op, PyObject *key,
+                                         Py_hash_t hash, PyObject **result)
+     _Py_P2_INIT_OVERLAY;
+ extern int _PyDict_GetItemRef_Unicode_LockHeld(PyDictObject *op, PyObject *key, PyObject **result);
+-extern int _PyObjectDict_SetItem(PyTypeObject *tp, PyObject *obj, PyObject **dictptr, PyObject *name, PyObject *value);
++extern int _PyObjectDict_SetItem(PyTypeObject *tp, PyObject *obj,
++                                 PyObject **dictptr, PyObject *name,
++                                 PyObject *value) _Py_P2_INIT_OVERLAY;
+ 
+ extern int _PyDict_Pop_KnownHash(
+     PyDictObject *dict,
+diff --git a/Include/object.h b/Include/object.h
+--- a/Include/object.h
++++ b/Include/object.h
+@@ -566,7 +566,7 @@ PyAPI_FUNC(PyObject *) PyObject_Bytes(PyObject *);
+ PyAPI_FUNC(PyObject *) PyObject_RichCompare(PyObject *, PyObject *, int);
+ PyAPI_FUNC(int) PyObject_RichCompareBool(PyObject *, PyObject *, int);
+ PyAPI_FUNC(PyObject *) PyObject_GetAttrString(PyObject *, const char *);
+-PyAPI_FUNC(int) PyObject_SetAttrString(PyObject *, const char *, PyObject *);
++PyAPI_FUNC(int) PyObject_SetAttrString(PyObject *, const char *, PyObject *) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(int) PyObject_DelAttrString(PyObject *v, const char *name);
+ PyAPI_FUNC(int) PyObject_HasAttrString(PyObject *, const char *);
+ PyAPI_FUNC(PyObject *) PyObject_GetAttr(PyObject *, PyObject *);
+@@ -574,6 +574,6 @@ PyAPI_FUNC(int) PyObject_GetOptionalAttr(PyObject *, PyObject *, PyObject **);
+ PyAPI_FUNC(int) PyObject_GetOptionalAttrString(PyObject *, const char *, PyObject **);
+ #endif
+-PyAPI_FUNC(int) PyObject_SetAttr(PyObject *, PyObject *, PyObject *);
++PyAPI_FUNC(int) PyObject_SetAttr(PyObject *, PyObject *, PyObject *) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(int) PyObject_DelAttr(PyObject *v, PyObject *name);
+ PyAPI_FUNC(int) PyObject_HasAttr(PyObject *, PyObject *);
+ #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 >= 0x030d0000
+@@ -583,7 +583,7 @@ PyAPI_FUNC(int) PyObject_HasAttrStringWithError(PyObject *, const char *);
+ #endif
+ PyAPI_FUNC(PyObject *) PyObject_SelfIter(PyObject *);
+ PyAPI_FUNC(PyObject *) PyObject_GenericGetAttr(PyObject *, PyObject *);
+-PyAPI_FUNC(int) PyObject_GenericSetAttr(PyObject *, PyObject *, PyObject *);
++PyAPI_FUNC(int) PyObject_GenericSetAttr(PyObject *, PyObject *, PyObject *) _Py_P2_INIT_OVERLAY;
+ #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 >= 0x03030000
+ PyAPI_FUNC(int) PyObject_GenericSetDict(PyObject *, PyObject *, void *);
+ #endif
+diff --git a/Objects/dictobject.c b/Objects/dictobject.c
+--- a/Objects/dictobject.c
++++ b/Objects/dictobject.c
+@@ -6747,7 +6747,7 @@ ensure_managed_dict(PyObject *obj)
+     return dict;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyDict_SetItem_LockHeld(PyDictObject *dict, PyObject *name, PyObject *value)
+ {
+     if (value == NULL) {
+@@ -7291,7 +7291,7 @@ PyObject_GenericGetDict(PyObject *obj, void *context)
+     }
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyObjectDict_SetItem(PyTypeObject *tp, PyObject *obj, PyObject **dictptr,
+                       PyObject *key, PyObject *value)
+ {
+diff --git a/Objects/moduleobject.c b/Objects/moduleobject.c
+--- a/Objects/moduleobject.c
++++ b/Objects/moduleobject.c
+@@ -165,7 +165,7 @@ check_api_version(const char *name, int module_api_version)
+     return 1;
+ }
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ _add_methods_to_object(PyObject *module, PyObject *name, PyMethodDef *functions)
+ {
+     PyObject *func;
+diff --git a/Objects/object.c b/Objects/object.c
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -1085,7 +1085,7 @@ PyObject_HasAttrString(PyObject *obj, const char *name)
+     return rc;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyObject_SetAttrString(PyObject *v, const char *name, PyObject *w)
+ {
+     PyObject *s;
+@@ -1323,7 +1323,7 @@ PyObject_HasAttr(PyObject *obj, PyObject *name)
+     return rc;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyObject_SetAttr(PyObject *v, PyObject *name, PyObject *value)
+ {
+     PyTypeObject *tp = Py_TYPE(v);
+@@ -1675,7 +1675,7 @@ PyObject_GenericGetAttr(PyObject *obj, PyObject *name)
+     return _PyObject_GenericGetAttrWithDict(obj, name, NULL, 0);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyObject_GenericSetAttrWithDict(PyObject *obj, PyObject *name,
+                                  PyObject *value, PyObject *dict)
+ {
+@@ -1771,7 +1771,7 @@ _PyObject_GenericSetAttrWithDict(PyObject *obj, PyObject *name,
+     return res;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyObject_GenericSetAttr(PyObject *obj, PyObject *name, PyObject *value)
+ {
+     return _PyObject_GenericSetAttrWithDict(obj, name, value, NULL);
+diff --git a/Objects/typeobject.c b/Objects/typeobject.c
+--- a/Objects/typeobject.c
++++ b/Objects/typeobject.c
+@@ -930,7 +930,7 @@ PyType_ClearWatcher(int watcher_id)
+     return 0;
+ }
+ 
+-static int assign_version_tag(PyInterpreterState *interp, PyTypeObject *type);
++_Py_P2_INIT_OVERLAY static int assign_version_tag(PyInterpreterState *interp, PyTypeObject *type);
+ 
+ int
+ PyType_Watch(int watcher_id, PyObject* obj)
+@@ -1130,7 +1130,7 @@ init_static_type_state(PyInterpreterState *interp, PyTypeObject *type)
+ 
+ #define MAX_VERSIONS_PER_CLASS 1000
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ assign_version_tag(PyInterpreterState *interp, PyTypeObject *type)
+ {
+     ASSERT_TYPE_LOCK_HELD();
+@@ -5075,7 +5075,7 @@ hackcheck_unlocked(PyObject *self, setattrofunc func, const char *what)
+ /* Internal API to look for a name through the MRO, bypassing the method cache.
+    This returns a borrowed reference, and might set an exception.
+    'error' is set to: -1: error with exception; 1: error without exception; 0: ok */
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ find_name_in_mro(PyTypeObject *type, PyObject *name, int *error)
+ {
+     ASSERT_TYPE_LOCK_HELD();
+@@ -5205,6 +5205,6 @@ update_cache_gil_disabled(struct type_cache_entry *entry, PyObject *name,
+ /* Internal API to look for a name through the MRO.
+    This returns a borrowed reference, and doesn't set an exception! */
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ _PyType_LookupRef(PyTypeObject *type, PyObject *name)
+ {
+     PyObject *res;
+-- 
+2.50.1

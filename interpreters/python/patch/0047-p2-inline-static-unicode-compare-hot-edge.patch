@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 20 Jul 2026 04:15:00 -0400
+Subject: [PATCH] p2: inline static Unicode compare hot edge
+
+Bound hardware HOT telemetry found at least 1,553 calls from group 7's
+hashtable_unicode_compare to group 10's unicode_compare_eq during the first
+five startup samples.  Each call copied the comparison group and then reloaded
+the 89,840-byte type-initialization group.
+
+Keep the shared rich-comparison implementation in group 10, but inline its
+exact equality core into the P2 static-intern callback.  This removes the
+measured nested transition without making ordinary Unicode comparisons reload
+the startup group.  The helper is P2-only and always-inline, so other targets
+retain the upstream function body and no standalone third implementation is
+emitted.  Unicode kinds are exactly 1, 2, or 4 bytes, so derive the byte count
+with a shift.  That avoids a multiplication helper and lets the measured
+296-byte callback fit in the 272-byte group headroom with 24 bytes remaining.
+---
+ Objects/unicodeobject.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/Objects/unicodeobject.c b/Objects/unicodeobject.c
+--- a/Objects/unicodeobject.c
++++ b/Objects/unicodeobject.c
+@@ -260,4 +260,32 @@ _PyUnicode_InternedSize_Immortal(void)
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++static inline Py_ALWAYS_INLINE int
++p2_unicode_compare_eq_inline(PyObject *str1, PyObject *str2)
++{
++    int kind;
++    const void *data1;
++    const void *data2;
++    Py_ssize_t len;
++    size_t bytes;
++    int cmp;
++
++    len = PyUnicode_GET_LENGTH(str1);
++    if (PyUnicode_GET_LENGTH(str2) != len) {
++        return 0;
++    }
++    kind = PyUnicode_KIND(str1);
++    if (PyUnicode_KIND(str2) != kind) {
++        return 0;
++    }
++    data1 = PyUnicode_DATA(str1);
++    data2 = PyUnicode_DATA(str2);
++
++    bytes = (size_t)len << (kind >> 1);
++    cmp = memcmp(data1, data2, bytes);
++    return cmp == 0;
++}
++#endif
++
+ _Py_P2_INIT_OVERLAY static Py_uhash_t
+ hashtable_unicode_hash(const void *key)
+ {
+@@ -269,7 +297,11 @@ hashtable_unicode_compare(const void *key1, const void *key2)
+     PyObject *obj1 = (PyObject *)key1;
+     PyObject *obj2 = (PyObject *)key2;
+     if (obj1 != NULL && obj2 != NULL) {
++#if defined(__NuttX__) && defined(__propeller2__)
++        return p2_unicode_compare_eq_inline(obj1, obj2);
++#else
+         return unicode_compare_eq(obj1, obj2);
++#endif
+     }
+     else {
+         return obj1 == obj2;
+@@ -10763,4 +10795,7 @@ unicode_compare_eq(PyObject *str1, PyObject *str2)
+ {
++#if defined(__NuttX__) && defined(__propeller2__)
++    return p2_unicode_compare_eq_inline(str1, str2);
++#else
+     int kind;
+     const void *data1, *data2;
+     Py_ssize_t len;
+@@ -10779,6 +10814,7 @@ unicode_compare_eq(PyObject *str1, PyObject *str2)
+ 
+     cmp = memcmp(data1, data2, len * kind);
+     return (cmp == 0);
++#endif
+ }
+ 
+ 
+-- 
+2.50.1

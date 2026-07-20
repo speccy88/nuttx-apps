@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 20 Jul 2026 07:10:00 -0400
+Subject: [PATCH] p2: use UTF-8 decoder for marshal ASCII
+
+The importlib startup path unmarshals many TYPE_ASCII and TYPE_SHORT_ASCII
+strings.  On P2, route genuinely ASCII payloads through the startup-hot UTF-8
+decoder instead of entering PyUnicode_FromKindAndData's separate overlay.
+
+Marshal readers must still accept externally supplied streams whose ASCII
+tags contain high bytes.  Scan the payload first and retain the upstream
+PyUnicode_FromKindAndData call for any byte at or above 0x80.  The helper and
+dispatch are P2-only; other targets retain the original call.  Both long and
+short ASCII cases already converge at _read_ascii, so one guarded dispatch
+covers interned and non-interned variants without changing reference handling.
+---
+ Python/marshal.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/Python/marshal.c b/Python/marshal.c
+--- a/Python/marshal.c
++++ b/Python/marshal.c
+@@ -706,6 +706,21 @@ typedef struct {
+     int allow_code;
+ } RFILE;
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++static inline Py_ALWAYS_INLINE int
++p2_marshal_is_ascii(const char *data, Py_ssize_t size)
++{
++    while (size > 0) {
++        if ((unsigned char)*data >= 0x80) {
++            return 0;
++        }
++        data++;
++        size--;
++    }
++    return 1;
++}
++#endif
++
+ static const char *
+ r_string(Py_ssize_t n, RFILE *p)
+ {
+@@ -1204,7 +1219,15 @@ r_object(RFILE *p)
+             ptr = r_string(n, p);
+             if (ptr == NULL)
+                 break;
++#if defined(__NuttX__) && defined(__propeller2__)
++            if (p2_marshal_is_ascii(ptr, n)) {
++                v = PyUnicode_DecodeUTF8Stateful(ptr, n, NULL, NULL);
++            }
++            else
++#endif
++            {
+             v = PyUnicode_FromKindAndData(PyUnicode_1BYTE_KIND, ptr, n);
++            }
+             if (v == NULL)
+                 break;
+             if (is_interned) {
+-- 
+2.50.1

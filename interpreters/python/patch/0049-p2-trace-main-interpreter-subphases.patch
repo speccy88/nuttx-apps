@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Mon, 20 Jul 2026 05:18:00 -0400
+Subject: [PATCH] p2: trace main interpreter subphases
+
+The first ten-minute P2 CPython run completed importlib and fixed path
+configuration but expired before the existing MAIN:PASS marker.  Add compact
+P2-only checkpoints around the seven fallible main-interpreter subphases so a
+bounded hardware run identifies the exact remaining call rather than treating
+the whole function as one opaque interval.
+
+Use a distinct MAINSTEP namespace.  MAIN:PASS remains the qualification
+marker, so these diagnostics cannot accidentally satisfy or invalidate the
+existing lifecycle contract.  Other targets retain the upstream function.
+---
+ Python/pylifecycle.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -1225,6 +1225,9 @@ init_interp_main(PyThreadState *tstate)
+         }
+         return _PyStatus_OK();
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:MAINSTEP:BEGIN\n");
++#endif
+ 
+     // Initialize the import-related configuration.
+     status = _PyConfig_InitImportConfig(&interp->config);
+@@ -1235,11 +1238,17 @@ init_interp_main(PyThreadState *tstate)
+     if (interpreter_update_config(tstate, 1) < 0) {
+         return _PyStatus_ERR("failed to update the Python config");
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:MAINSTEP:CONFIG:PASS\n");
++#endif
+ 
+     status = _PyImport_InitExternal(tstate);
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:MAINSTEP:EXTERNAL:PASS\n");
++#endif
+ 
+     if (is_main_interp) {
+         /* initialize the faulthandler module */
+@@ -1253,6 +1262,9 @@ init_interp_main(PyThreadState *tstate)
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:MAINSTEP:ENCODINGS:PASS\n");
++#endif
+ 
+     if (is_main_interp) {
+         if (_PySignal_Init(config->install_signal_handlers) < 0) {
+@@ -1286,11 +1298,17 @@ init_interp_main(PyThreadState *tstate)
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:MAINSTEP:STREAMS:PASS\n");
++#endif
+ 
+     status = init_set_builtins_open();
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:MAINSTEP:BUILTINS_OPEN:PASS\n");
++#endif
+ 
+ #ifdef __ANDROID__
+     status = init_android_streams(tstate);
+@@ -1307,7 +1325,10 @@ init_interp_main(PyThreadState *tstate)
+     if (_PyStatus_EXCEPTION(status)) {
+         return status;
+     }
++#if defined(__NuttX__) && defined(__propeller2__)
++    printf("P2PY:MAINSTEP:MAIN_MODULE:PASS\n");
++#endif
+ 
+     if (is_main_interp) {
+         /* Initialize warnings. */
+         PyObject *warnoptions = PySys_GetObject("warnoptions");
+-- 
+2.50.1

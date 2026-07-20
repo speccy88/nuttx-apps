@@ -8,11 +8,14 @@ config TESTING_P2PSRAM
 	default n
 	depends on ARCH_P2 && BUILD_FLAT
 	depends on P2_EC32MB_PSRAM
+	depends on P2_EC32MB_PSRAM_FAULT_INJECT_TIMEOUT
 	depends on BUILTIN && NSH_BUILTIN_APPS
 	---help---
 		Enable a bounded, destructive test of the explicit /dev/psram0
 		service.  External PSRAM remains a character-device bulk store; this
 		test never treats it as native heap, stack, code, or pointer memory.
+		The board's one-request cooperative-stall hook makes the timeout proof
+		deterministic without depending on the selected PSRAM wire clock.
 
 if TESTING_P2PSRAM
 

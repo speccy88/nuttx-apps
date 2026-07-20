@@ -1,0 +1,283 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 18 Jul 2026 00:00:00 +0000
+Subject: [PATCH] p2: collapse measured CPython startup transitions
+
+Keep the UTF-8 decoder family in one small explicit overlay and pin the
+startup services that otherwise alternate between large automatic groups
+during configuration, static-string interning, and type-cache setup.  These
+placements are selected from HIL overlay telemetry; they avoid repeated PSRAM
+loads without changing CPython semantics on P2 or any other architecture.
+---
+ 15 files changed, 40 insertions(+), 22 deletions(-)
+
+--- a/Include/internal/pycore_fileutils.h
++++ b/Include/internal/pycore_fileutils.h
+@@ -213,7 +213,7 @@ extern int _Py_DecodeUTF8Ex(
+     wchar_t **wstr,
+     size_t *wlen,
+     const char **reason,
+-    _Py_error_handler errors);
++    _Py_error_handler errors) _Py_P2_UTF8_OVERLAY;
+ 
+ extern int _Py_EncodeUTF8Ex(
+     const wchar_t *text,
+--- a/Include/internal/pycore_getopt.h
++++ b/Include/internal/pycore_getopt.h
+@@ -9,7 +9,7 @@ extern int _PyOS_opterr;
+ extern Py_ssize_t _PyOS_optind;
+ extern const wchar_t *_PyOS_optarg;
+ 
+-extern void _PyOS_ResetGetOpt(void);
++extern void _PyOS_ResetGetOpt(void) _Py_P2_HUB_RESIDENT;
+ 
+ typedef struct {
+     const wchar_t *name;
+@@ -17,6 +17,7 @@ typedef struct {
+     int val;
+ } _PyOS_LongOption;
+ 
+-extern int _PyOS_GetOpt(Py_ssize_t argc, wchar_t * const *argv, int *longindex);
++extern int _PyOS_GetOpt(Py_ssize_t argc, wchar_t * const *argv, int *longindex)
++    _Py_P2_HUB_RESIDENT;
+ 
+ #endif /* !Py_INTERNAL_PYGETOPT_H */
+--- a/Include/internal/pycore_hashtable.h
++++ b/Include/internal/pycore_hashtable.h
+@@ -114,7 +114,7 @@ PyAPI_FUNC(size_t) _Py_hashtable_len(const _Py_hashtable_t *ht);
+ PyAPI_FUNC(int) _Py_hashtable_set(
+     _Py_hashtable_t *ht,
+     const void *key,
+-    void *value);
++    void *value) _Py_P2_HUB_RESIDENT;
+ 
+ 
+ /* Get an entry.
+@@ -131,7 +131,8 @@ _Py_hashtable_get_entry(_Py_hashtable_t *ht, const void *key)
+ 
+    Use _Py_hashtable_get_entry() to distinguish entry value equal to NULL
+    and entry not found. */
+-PyAPI_FUNC(void*) _Py_hashtable_get(_Py_hashtable_t *ht, const void *key);
++PyAPI_FUNC(void*) _Py_hashtable_get(_Py_hashtable_t *ht, const void *key)
++    _Py_P2_HUB_RESIDENT;
+ 
+ 
+ /* Remove a key and its associated value without calling key and value destroy
+--- a/Include/internal/pycore_object.h
++++ b/Include/internal/pycore_object.h
+@@ -289,7 +289,8 @@ _PyType_HasFeature(PyTypeObject *type, unsigned long feature) {
+     return ((FT_ATOMIC_LOAD_ULONG_RELAXED(type->tp_flags) & feature) != 0);
+ }
+ 
+-extern void _PyType_InitCache(PyInterpreterState *interp);
++extern void _PyType_InitCache(PyInterpreterState *interp)
++    _Py_P2_HUB_RESIDENT;
+ 
+ extern PyStatus _PyObject_InitState(PyInterpreterState *interp);
+ extern void _PyObject_FiniState(PyInterpreterState *interp);
+--- a/Include/internal/pycore_pystate.h
++++ b/Include/internal/pycore_pystate.h
+@@ -120,7 +120,7 @@ extern _Py_thread_local PyThreadState *_Py_tss_tstate;
+ extern int _PyThreadState_CheckConsistency(PyThreadState *tstate);
+ #endif
+ 
+-int _PyThreadState_MustExit(PyThreadState *tstate);
++int _PyThreadState_MustExit(PyThreadState *tstate) _Py_P2_HUB_RESIDENT;
+ 
+ // Export for most shared extensions, used via _PyThreadState_GET() static
+ // inline function.
+--- a/Include/internal/pycore_unicodeobject.h
++++ b/Include/internal/pycore_unicodeobject.h
+@@ -287,7 +287,8 @@ PyAPI_FUNC(void) _PyUnicode_InternImmortal(PyInterpreterState *interp, PyObject
+ // Left here to help backporting:
+ PyAPI_FUNC(void) _PyUnicode_InternInPlace(PyInterpreterState *interp, PyObject **p);
+ // Only for singletons in the _PyRuntime struct:
+-extern void _PyUnicode_InternStatic(PyInterpreterState *interp, PyObject **);
++extern void _PyUnicode_InternStatic(PyInterpreterState *interp, PyObject **)
++    _Py_P2_HUB_RESIDENT;
+ 
+ /* --- Other API ---------------------------------------------------------- */
+ 
+--- a/Include/pyerrors.h
++++ b/Include/pyerrors.h
+@@ -319,8 +319,10 @@ PyAPI_FUNC(int) PyUnicodeTranslateError_SetReason(
+     );
+ 
+ PyAPI_FUNC(int) PyOS_snprintf(char *str, size_t size, const char  *format, ...)
++                        _Py_P2_HUB_RESIDENT
+                         Py_GCC_ATTRIBUTE((format(printf, 3, 4)));
+ PyAPI_FUNC(int) PyOS_vsnprintf(char *str, size_t size, const char  *format, va_list va)
++                        _Py_P2_HUB_RESIDENT
+                         Py_GCC_ATTRIBUTE((format(printf, 3, 0)));
+ 
+ #ifndef Py_LIMITED_API
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -3,8 +3,10 @@
+ 
+ #if defined(__NuttX__) && defined(__propeller2__)
+ #  define _Py_P2_HUB_RESIDENT __attribute__((p2_hub_resident))
++#  define _Py_P2_UTF8_OVERLAY __attribute__((p2_hub_overlay(6)))
+ #else
+ #  define _Py_P2_HUB_RESIDENT
++#  define _Py_P2_UTF8_OVERLAY
+ #endif
+ 
+ #ifndef UCHAR_MAX
+--- a/Objects/stringlib/codecs.h
++++ b/Objects/stringlib/codecs.h
+@@ -19,7 +19,7 @@
+ /* 10xxxxxx */
+ #define IS_CONTINUATION_BYTE(ch) ((ch) >= 0x80 && (ch) < 0xC0)
+ 
+-Py_LOCAL_INLINE(Py_UCS4)
++Py_LOCAL_INLINE(Py_UCS4) _Py_P2_UTF8_OVERLAY
+ STRINGLIB(utf8_decode)(const char **inptr, const char *end,
+                        STRINGLIB_CHAR *dest,
+                        Py_ssize_t *outpos)
+--- a/Objects/typeobject.c
++++ b/Objects/typeobject.c
+@@ -828,7 +828,7 @@ type_cache_clear(struct type_cache *cache, PyObject *value)
+ }
+ 
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ _PyType_InitCache(PyInterpreterState *interp)
+ {
+     struct type_cache *cache = &interp->types.type_cache;
+--- a/Objects/unicodeobject.c
++++ b/Objects/unicodeobject.c
+@@ -5056,7 +5056,7 @@ PyUnicode_DecodeUTF8Stateful(const char *s,
+    On decoding error (if surrogateescape is zero), return -2. If wlen is
+    non-NULL, write the start of the illegal byte sequence into *wlen. If reason
+    is not NULL, write the decoding error message into *reason. */
+-int
++_Py_P2_UTF8_OVERLAY int
+ _Py_DecodeUTF8Ex(const char *s, Py_ssize_t size, wchar_t **wstr, size_t *wlen,
+                  const char **reason, _Py_error_handler errors)
+ {
+@@ -15088,7 +15088,7 @@ intern_static(PyInterpreterState *interp, PyObject *s /* stolen */)
+     return s;
+ }
+ 
+-void
++_Py_P2_HUB_RESIDENT void
+ _PyUnicode_InternStatic(PyInterpreterState *interp, PyObject **p)
+ {
+     // This should only be called as part of runtime initialization
+--- a/Python/getopt.c
++++ b/Python/getopt.c
+@@ -49,7 +49,7 @@ static const _PyOS_LongOption longopts[] = {
+ };
+ 
+ 
+-void _PyOS_ResetGetOpt(void)
++_Py_P2_HUB_RESIDENT void _PyOS_ResetGetOpt(void)
+ {
+     _PyOS_opterr = 1;
+     _PyOS_optind = 1;
+@@ -57,7 +57,8 @@ void _PyOS_ResetGetOpt(void)
+     opt_ptr = L"";
+ }
+ 
+-int _PyOS_GetOpt(Py_ssize_t argc, wchar_t * const *argv, int *longindex)
++_Py_P2_HUB_RESIDENT int
++_PyOS_GetOpt(Py_ssize_t argc, wchar_t * const *argv, int *longindex)
+ {
+     wchar_t *ptr;
+     wchar_t option;
+--- a/Python/hashtable.c
++++ b/Python/hashtable.c
+@@ -61,7 +61,7 @@
+         ((_Py_hashtable_entry_t *)_Py_SLIST_ITEM_NEXT(ENTRY))
+ 
+ /* Forward declaration */
+-static int hashtable_rehash(_Py_hashtable_t *ht);
++static int hashtable_rehash(_Py_hashtable_t *ht) _Py_P2_HUB_RESIDENT;
+ 
+ static void
+ _Py_slist_init(_Py_slist_t *list)
+@@ -136,7 +136,7 @@ _Py_hashtable_len(const _Py_hashtable_t *ht)
+ }
+ 
+ 
+-_Py_hashtable_entry_t *
++_Py_P2_HUB_RESIDENT _Py_hashtable_entry_t *
+ _Py_hashtable_get_entry_generic(_Py_hashtable_t *ht, const void *key)
+ {
+     Py_uhash_t key_hash = ht->hash_func(key);
+@@ -213,7 +213,7 @@ _Py_hashtable_steal(_Py_hashtable_t *ht, const void *key)
+ }
+ 
+ 
+-int
++_Py_P2_HUB_RESIDENT int
+ _Py_hashtable_set(_Py_hashtable_t *ht, const void *key, void *value)
+ {
+     _Py_hashtable_entry_t *entry;
+@@ -251,7 +251,7 @@ _Py_hashtable_set(_Py_hashtable_t *ht, const void *key, void *value)
+ }
+ 
+ 
+-void*
++_Py_P2_HUB_RESIDENT void*
+ _Py_hashtable_get(_Py_hashtable_t *ht, const void *key)
+ {
+     _Py_hashtable_entry_t *entry = ht->get_entry_func(ht, key);
+@@ -283,7 +283,7 @@ _Py_hashtable_foreach(_Py_hashtable_t *ht,
+ }
+ 
+ 
+-static int
++_Py_P2_HUB_RESIDENT static int
+ hashtable_rehash(_Py_hashtable_t *ht)
+ {
+     size_t new_size = round_size((size_t)(ht->nentries * HASHTABLE_REHASH_FACTOR));
+--- a/Python/mysnprintf.c
++++ b/Python/mysnprintf.c
+@@ -37,7 +37,7 @@
+    Also, size must be smaller than INT_MAX.
+ */
+ 
+-int
++_Py_P2_HUB_RESIDENT int
+ PyOS_snprintf(char *str, size_t size, const  char  *format, ...)
+ {
+     int rc;
+@@ -49,7 +49,7 @@ PyOS_snprintf(char *str, size_t size, const  char  *format, ...)
+     return rc;
+ }
+ 
+-int
++_Py_P2_HUB_RESIDENT int
+ PyOS_vsnprintf(char *str, size_t size, const char  *format, va_list va)
+ {
+     assert(str != NULL);
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -3063,7 +3063,11 @@ _PyThreadState_CheckConsistency(PyThreadState *tstate)
+ // is used, the pointer is not deferenced.
+ //
+ // tstate must be non-NULL.
+-int
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute pop
++#endif
++
++_Py_P2_HUB_RESIDENT int
+ _PyThreadState_MustExit(PyThreadState *tstate)
+ {
+     /* bpo-39877: Access _PyRuntime directly rather than using
+@@ -3092,6 +3096,11 @@ _PyThreadState_MustExit(PyThreadState *tstate)
+     return 1;
+ }
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++#  pragma clang attribute push(__attribute__((p2_hub_overlay(4))), \
++                               apply_to = function)
++#endif
++
+ /********************/
+ /* mimalloc support */
+ /********************/

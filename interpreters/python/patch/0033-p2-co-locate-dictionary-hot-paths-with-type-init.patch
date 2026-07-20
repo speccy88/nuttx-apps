@@ -1,0 +1,752 @@
+From a5c5ebf1e99e76ca851e920d65d4501daa89f083 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 10:58:13 -0400
+Subject: [PATCH] p2: co-locate dictionary hot paths with type init
+
+Production telemetry identified the dictionary hot path split across automatic
+overlay groups d5 and d6 as a source of repeated startup transitions. Merge the
+exact measured 43-function dictionary set into explicit type-init group 7.
+Post-link residency verification enforces that the final group fits the
+90,112-byte slot.
+
+Keep PyObject_IS_GC and _Py_NewReference Hub-resident because they are tiny,
+transition-heavy helpers. On P2, give _PyDict_NotifyEvent one external group-7
+implementation so its header users cannot emit duplicate public overlay stubs;
+retain the static inline implementation elsewhere.
+---
+ Include/cpython/dictobject.h   |  26 ++++++---
+ Include/cpython/object.h       |  11 ++--
+ Include/cpython/objimpl.h      |   2 +-
+ Include/dictobject.h           |  43 +++++++++-----
+ Include/internal/pycore_dict.h |  39 +++++++++----
+ Objects/dictobject.c           | 104 ++++++++++++++++++++-------------
+ Objects/object.c               |   2 +-
+ Python/gc.c                    |   2 +-
+ 8 files changed, 145 insertions(+), 84 deletions(-)
+
+diff --git a/Include/cpython/dictobject.h b/Include/cpython/dictobject.h
+index 2a7e319..4e2358c 100644
+--- a/Include/cpython/dictobject.h
++++ b/Include/cpython/dictobject.h
+@@ -39,7 +39,7 @@ PyAPI_FUNC(PyObject *) _PyDict_GetItem_KnownHash(PyObject *mp, PyObject *key,
+                                                  Py_hash_t hash);
+ PyAPI_FUNC(PyObject *) _PyDict_GetItemStringWithError(PyObject *, const char *);
+ PyAPI_FUNC(PyObject *) PyDict_SetDefault(
+-    PyObject *mp, PyObject *key, PyObject *defaultobj);
++    PyObject *mp, PyObject *key, PyObject *defaultobj) _Py_P2_INIT_OVERLAY;
+ 
+ // Inserts `key` with a value `default_value`, if `key` is not already present
+ // in the dictionary.  If `result` is not NULL, then the value associated
+@@ -64,13 +64,18 @@ static inline Py_ssize_t PyDict_GET_SIZE(PyObject *op) {
+ }
+ #define PyDict_GET_SIZE(op) PyDict_GET_SIZE(_PyObject_CAST(op))
+ 
+-PyAPI_FUNC(int) PyDict_ContainsString(PyObject *mp, const char *key);
++PyAPI_FUNC(int) PyDict_ContainsString(PyObject *mp, const char *key)
++    _Py_P2_INIT_OVERLAY;
+ 
+ PyAPI_FUNC(PyObject *) _PyDict_NewPresized(Py_ssize_t minused);
+ 
+-PyAPI_FUNC(int) PyDict_Pop(PyObject *dict, PyObject *key, PyObject **result);
+-PyAPI_FUNC(int) PyDict_PopString(PyObject *dict, const char *key, PyObject **result);
+-PyAPI_FUNC(PyObject *) _PyDict_Pop(PyObject *dict, PyObject *key, PyObject *default_value);
++PyAPI_FUNC(int) PyDict_Pop(PyObject *dict, PyObject *key, PyObject **result)
++    _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyDict_PopString(PyObject *dict, const char *key,
++                                 PyObject **result) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) _PyDict_Pop(PyObject *dict, PyObject *key,
++                                   PyObject *default_value)
++    _Py_P2_INIT_OVERLAY;
+ 
+ /* Dictionary watchers */
+ 
+@@ -94,9 +99,12 @@ typedef enum {
+ typedef int(*PyDict_WatchCallback)(PyDict_WatchEvent event, PyObject* dict, PyObject* key, PyObject* new_value);
+ 
+ // Register/unregister a dict-watcher callback
+-PyAPI_FUNC(int) PyDict_AddWatcher(PyDict_WatchCallback callback);
+-PyAPI_FUNC(int) PyDict_ClearWatcher(int watcher_id);
++PyAPI_FUNC(int) PyDict_AddWatcher(PyDict_WatchCallback callback)
++    _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyDict_ClearWatcher(int watcher_id) _Py_P2_INIT_OVERLAY;
+ 
+ // Mark given dictionary as "watched" (callback will be called if it is modified)
+-PyAPI_FUNC(int) PyDict_Watch(int watcher_id, PyObject* dict);
+-PyAPI_FUNC(int) PyDict_Unwatch(int watcher_id, PyObject* dict);
++PyAPI_FUNC(int) PyDict_Watch(int watcher_id, PyObject* dict)
++    _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyDict_Unwatch(int watcher_id, PyObject* dict)
++    _Py_P2_INIT_OVERLAY;
+diff --git a/Include/cpython/object.h b/Include/cpython/object.h
+index 3a19008..423bd9c 100644
+--- a/Include/cpython/object.h
++++ b/Include/cpython/object.h
+@@ -2,7 +2,7 @@
+ #  error "this header file must not be included directly"
+ #endif
+ 
+-PyAPI_FUNC(void) _Py_NewReference(PyObject *op) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(void) _Py_NewReference(PyObject *op) _Py_P2_HUB_RESIDENT;
+ PyAPI_FUNC(void) _Py_NewReferenceNoTotal(PyObject *op) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(void) _Py_ResurrectReference(PyObject *op);
+ 
+@@ -495,9 +495,12 @@ do { \
+ 
+ PyAPI_FUNC(void *) PyObject_GetItemData(PyObject *obj);
+ 
+-PyAPI_FUNC(int) PyObject_VisitManagedDict(PyObject *obj, visitproc visit, void *arg);
+-PyAPI_FUNC(int) _PyObject_SetManagedDict(PyObject *obj, PyObject *new_dict);
+-PyAPI_FUNC(void) PyObject_ClearManagedDict(PyObject *obj);
++PyAPI_FUNC(int) PyObject_VisitManagedDict(PyObject *obj, visitproc visit,
++                                          void *arg) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) _PyObject_SetManagedDict(PyObject *obj, PyObject *new_dict)
++    _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(void) PyObject_ClearManagedDict(PyObject *obj)
++    _Py_P2_INIT_OVERLAY;
+ 
+ #define TYPE_MAX_WATCHERS 8
+ 
+diff --git a/Include/cpython/objimpl.h b/Include/cpython/objimpl.h
+index 5aaf394..93bda9d 100644
+--- a/Include/cpython/objimpl.h
++++ b/Include/cpython/objimpl.h
+@@ -75,7 +75,7 @@ PyAPI_FUNC(void) PyObject_SetArenaAllocator(PyObjectArenaAllocator *allocator);
+ 
+ 
+ /* Test if an object implements the garbage collector protocol */
+-PyAPI_FUNC(int) PyObject_IS_GC(PyObject *obj) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyObject_IS_GC(PyObject *obj) _Py_P2_HUB_RESIDENT;
+ 
+ 
+ // Test if a type supports weak references
+diff --git a/Include/dictobject.h b/Include/dictobject.h
+index fc0beae..aa40ac6 100644
+--- a/Include/dictobject.h
++++ b/Include/dictobject.h
+@@ -19,22 +19,26 @@ PyAPI_DATA(PyTypeObject) PyDict_Type;
+ #define PyDict_CheckExact(op) Py_IS_TYPE((op), &PyDict_Type)
+ 
+ PyAPI_FUNC(PyObject *) PyDict_New(void) _Py_P2_INIT_OVERLAY;
+-PyAPI_FUNC(PyObject *) PyDict_GetItem(PyObject *mp, PyObject *key);
+-PyAPI_FUNC(PyObject *) PyDict_GetItemWithError(PyObject *mp, PyObject *key);
++PyAPI_FUNC(PyObject *) PyDict_GetItem(PyObject *mp, PyObject *key)
++    _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) PyDict_GetItemWithError(PyObject *mp, PyObject *key)
++    _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(int) PyDict_SetItem(PyObject *mp, PyObject *key, PyObject *item) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(int) PyDict_DelItem(PyObject *mp, PyObject *key);
+ PyAPI_FUNC(void) PyDict_Clear(PyObject *mp);
+ PyAPI_FUNC(int) PyDict_Next(
+-    PyObject *mp, Py_ssize_t *pos, PyObject **key, PyObject **value);
+-PyAPI_FUNC(PyObject *) PyDict_Keys(PyObject *mp);
+-PyAPI_FUNC(PyObject *) PyDict_Values(PyObject *mp);
+-PyAPI_FUNC(PyObject *) PyDict_Items(PyObject *mp);
+-PyAPI_FUNC(Py_ssize_t) PyDict_Size(PyObject *mp);
++    PyObject *mp, Py_ssize_t *pos, PyObject **key, PyObject **value)
++    _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) PyDict_Keys(PyObject *mp) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) PyDict_Values(PyObject *mp) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) PyDict_Items(PyObject *mp) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(Py_ssize_t) PyDict_Size(PyObject *mp) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyDict_Copy(PyObject *mp);
+ PyAPI_FUNC(int) PyDict_Contains(PyObject *mp, PyObject *key) _Py_P2_INIT_OVERLAY;
+ 
+ /* PyDict_Update(mp, other) is equivalent to PyDict_Merge(mp, other, 1). */
+-PyAPI_FUNC(int) PyDict_Update(PyObject *mp, PyObject *other);
++PyAPI_FUNC(int) PyDict_Update(PyObject *mp, PyObject *other)
++    _Py_P2_INIT_OVERLAY;
+ 
+ /* PyDict_Merge updates/merges from a mapping object (an object that
+    supports PyMapping_Keys() and PyObject_GetItem()).  If override is true,
+@@ -43,7 +47,7 @@ PyAPI_FUNC(int) PyDict_Update(PyObject *mp, PyObject *other);
+ */
+ PyAPI_FUNC(int) PyDict_Merge(PyObject *mp,
+                              PyObject *other,
+-                             int override);
++                             int override) _Py_P2_INIT_OVERLAY;
+ 
+ /* PyDict_MergeFromSeq2 updates/merges from an iterable object producing
+    iterable objects of length 2.  If override is true, the last occurrence
+@@ -52,11 +56,14 @@ PyAPI_FUNC(int) PyDict_Merge(PyObject *mp,
+ */
+ PyAPI_FUNC(int) PyDict_MergeFromSeq2(PyObject *d,
+                                      PyObject *seq2,
+-                                     int override);
++                                     int override) _Py_P2_INIT_OVERLAY;
+ 
+-PyAPI_FUNC(PyObject *) PyDict_GetItemString(PyObject *dp, const char *key);
+-PyAPI_FUNC(int) PyDict_SetItemString(PyObject *dp, const char *key, PyObject *item);
+-PyAPI_FUNC(int) PyDict_DelItemString(PyObject *dp, const char *key);
++PyAPI_FUNC(PyObject *) PyDict_GetItemString(PyObject *dp, const char *key)
++    _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyDict_SetItemString(PyObject *dp, const char *key,
++                                     PyObject *item) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyDict_DelItemString(PyObject *dp, const char *key)
++    _Py_P2_INIT_OVERLAY;
+ 
+ #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 >= 0x030D0000
+ // Return the object from dictionary *op* which has a key *key*.
+@@ -64,12 +71,16 @@ PyAPI_FUNC(int) PyDict_DelItemString(PyObject *dp, const char *key);
+ //   and return 1.
+ // - If the key is missing, set *result to NULL and return 0 .
+ // - On error, raise an exception and return -1.
+-PyAPI_FUNC(int) PyDict_GetItemRef(PyObject *mp, PyObject *key, PyObject **result);
+-PyAPI_FUNC(int) PyDict_GetItemStringRef(PyObject *mp, const char *key, PyObject **result);
++PyAPI_FUNC(int) PyDict_GetItemRef(PyObject *mp, PyObject *key,
++                                  PyObject **result) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyDict_GetItemStringRef(PyObject *mp, const char *key,
++                                        PyObject **result)
++    _Py_P2_INIT_OVERLAY;
+ #endif
+ 
+ #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 >= 0x030A0000
+-PyAPI_FUNC(PyObject *) PyObject_GenericGetDict(PyObject *, void *);
++PyAPI_FUNC(PyObject *) PyObject_GenericGetDict(PyObject *, void *)
++    _Py_P2_INIT_OVERLAY;
+ #endif
+ 
+ /* Dictionary (keys, values, items) views */
+diff --git a/Include/internal/pycore_dict.h b/Include/internal/pycore_dict.h
+index a2824bb..5b47613 100644
+--- a/Include/internal/pycore_dict.h
++++ b/Include/internal/pycore_dict.h
+@@ -47,7 +47,7 @@ extern int _PyDict_HasOnlyStringKeys(PyObject *mp);
+ extern void _PyDict_MaybeUntrack(PyObject *mp);
+ 
+ // Export for '_ctypes' shared extension
+-PyAPI_FUNC(Py_ssize_t) _PyDict_SizeOf(PyDictObject *);
++PyAPI_FUNC(Py_ssize_t) _PyDict_SizeOf(PyDictObject *) _Py_P2_INIT_OVERLAY;
+ 
+ #define _PyDict_HasSplitTable(d) ((d)->ma_values != NULL)
+ 
+@@ -86,16 +86,19 @@ typedef struct {
+ } PyDictUnicodeEntry;
+ 
+ extern PyDictKeysObject *_PyDict_NewKeysForClass(void) _Py_P2_INIT_OVERLAY;
+-extern PyObject *_PyDict_FromKeys(PyObject *, PyObject *, PyObject *);
++extern PyObject *_PyDict_FromKeys(PyObject *, PyObject *, PyObject *)
++    _Py_P2_INIT_OVERLAY;
+ 
+ /* Gets a version number unique to the current state of the keys of dict, if possible.
+  * Returns the version number, or zero if it was not possible to get a version number. */
+ extern uint32_t _PyDictKeys_GetVersionForCurrentState(
+-        PyInterpreterState *interp, PyDictKeysObject *dictkeys);
++        PyInterpreterState *interp, PyDictKeysObject *dictkeys)
++    _Py_P2_INIT_OVERLAY;
+ 
+ extern size_t _PyDict_KeysSize(PyDictKeysObject *keys);
+ 
+-extern void _PyDictKeys_DecRef(PyDictKeysObject *keys);
++extern void _PyDictKeys_DecRef(PyDictKeysObject *keys)
++    _Py_P2_INIT_OVERLAY;
+ 
+ /* _Py_dict_lookup() returns index of entry which can be used like DK_ENTRIES(dk)[index].
+  * -1 when no entry found, -3 when compare raises error.
+@@ -104,7 +107,9 @@ extern Py_ssize_t _Py_dict_lookup(PyDictObject *mp, PyObject *key, Py_hash_t has
+ extern Py_ssize_t _Py_dict_lookup_threadsafe(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject **value_addr);
+ 
+ extern Py_ssize_t _PyDict_LookupIndex(PyDictObject *, PyObject *);
+-extern Py_ssize_t _PyDictKeys_StringLookup(PyDictKeysObject* dictkeys, PyObject *key);
++extern Py_ssize_t _PyDictKeys_StringLookup(PyDictKeysObject* dictkeys,
++                                           PyObject *key)
++    _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *)_PyDict_LoadGlobal(PyDictObject *, PyDictObject *, PyObject *);
+ 
+ /* Consumes references to key and value */
+@@ -112,10 +117,13 @@ PyAPI_FUNC(int) _PyDict_SetItem_Take2(PyDictObject *op, PyObject *key, PyObject
+ extern int _PyDict_SetItem_LockHeld(PyDictObject *dict, PyObject *name, PyObject *value);
+ // Export for '_asyncio' shared extension
+ PyAPI_FUNC(int) _PyDict_SetItem_KnownHash_LockHeld(PyDictObject *mp, PyObject *key,
+-                                                   PyObject *value, Py_hash_t hash);
++                                                   PyObject *value, Py_hash_t hash)
++    _Py_P2_INIT_OVERLAY;
+ // Export for '_asyncio' shared extension
+ PyAPI_FUNC(int) _PyDict_GetItemRef_KnownHash_LockHeld(PyDictObject *op, PyObject *key, Py_hash_t hash, PyObject **result);
+-extern int _PyDict_GetItemRef_KnownHash(PyDictObject *op, PyObject *key, Py_hash_t hash, PyObject **result);
++extern int _PyDict_GetItemRef_KnownHash(PyDictObject *op, PyObject *key,
++                                        Py_hash_t hash, PyObject **result)
++    _Py_P2_INIT_OVERLAY;
+ extern int _PyDict_GetItemRef_Unicode_LockHeld(PyDictObject *op, PyObject *key, PyObject **result);
+ extern int _PyObjectDict_SetItem(PyTypeObject *tp, PyObject *obj, PyObject **dictptr, PyObject *name, PyObject *value);
+ 
+@@ -123,7 +131,7 @@ extern int _PyDict_Pop_KnownHash(
+     PyDictObject *dict,
+     PyObject *key,
+     Py_hash_t hash,
+-    PyObject **result);
++    PyObject **result) _Py_P2_INIT_OVERLAY;
+ 
+ #define DKIX_EMPTY (-1)
+ #define DKIX_DUMMY (-2)  /* Used internally */
+@@ -262,6 +270,14 @@ _PyDict_SendEvent(int watcher_bits,
+                   PyObject *key,
+                   PyObject *value) _Py_P2_INIT_OVERLAY;
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++extern uint64_t
++_PyDict_NotifyEvent(PyInterpreterState *interp,
++                    PyDict_WatchEvent event,
++                    PyDictObject *mp,
++                    PyObject *key,
++                    PyObject *value) _Py_P2_INIT_OVERLAY;
++#else
+ static inline uint64_t
+ _PyDict_NotifyEvent(PyInterpreterState *interp,
+                     PyDict_WatchEvent event,
+@@ -277,6 +293,7 @@ _PyDict_NotifyEvent(PyInterpreterState *interp,
+     }
+     return DICT_NEXT_VERSION(interp) | (mp->ma_version_tag & DICT_WATCHER_AND_MODIFICATION_MASK);
+ }
++#endif
+ 
+ extern PyDictObject *_PyObject_MaterializeManagedDict(PyObject *obj);
+ 
+@@ -330,9 +347,11 @@ _PyInlineValuesSize(PyTypeObject *tp)
+ }
+ 
+ int
+-_PyDict_DetachFromObject(PyDictObject *dict, PyObject *obj);
++_PyDict_DetachFromObject(PyDictObject *dict, PyObject *obj)
++    _Py_P2_INIT_OVERLAY;
+ 
+-PyDictObject *_PyObject_MaterializeManagedDict_LockHeld(PyObject *);
++PyDictObject *_PyObject_MaterializeManagedDict_LockHeld(PyObject *)
++    _Py_P2_INIT_OVERLAY;
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/Objects/dictobject.c b/Objects/dictobject.c
+index 4435eae..57a954c 100644
+--- a/Objects/dictobject.c
++++ b/Objects/dictobject.c
+@@ -943,7 +943,7 @@ new_dict(PyInterpreterState *interp,
+     return (PyObject *)mp;
+ }
+ 
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ new_dict_with_shared_keys(PyInterpreterState *interp, PyDictKeysObject *keys)
+ {
+     size_t size = shared_keys_usable_size(keys);
+@@ -1188,7 +1188,7 @@ dictkeys_generic_lookup(PyDictObject *mp, PyDictKeysObject* dk, PyObject *key, P
+  * If the keys is present then return the index of key.
+  * If the key is not present then return DKIX_EMPTY.
+  */
+-Py_ssize_t
++_Py_P2_INIT_OVERLAY Py_ssize_t
+ _PyDictKeys_StringLookup(PyDictKeysObject* dk, PyObject *key)
+ {
+     DictKeysKind kind = dk->dk_kind;
+@@ -2183,7 +2183,7 @@ _PyDict_FromItems(PyObject *const *keys, Py_ssize_t keys_offset,
+  * function hits a stack-depth error, which can cause this to return NULL
+  * even if the key is present.
+  */
+-static PyObject *
++_Py_P2_INIT_OVERLAY static PyObject *
+ dict_getitem(PyObject *op, PyObject *key, const char *warnmsg)
+ {
+     if (!PyDict_Check(op)) {
+@@ -2227,7 +2227,7 @@ dict_getitem(PyObject *op, PyObject *key, const char *warnmsg)
+     return value;  // borrowed reference
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDict_GetItem(PyObject *op, PyObject *key)
+ {
+     return dict_getitem(op, key,
+@@ -2304,7 +2304,7 @@ _PyDict_GetItemRef_KnownHash_LockHeld(PyDictObject *op, PyObject *key,
+  * Returns 1 if the key is present, 0 if the key is missing, and -1 if an
+  * exception occurred.
+ */
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyDict_GetItemRef_KnownHash(PyDictObject *op, PyObject *key, Py_hash_t hash, PyObject **result)
+ {
+     PyObject *value;
+@@ -2330,7 +2330,7 @@ _PyDict_GetItemRef_KnownHash(PyDictObject *op, PyObject *key, Py_hash_t hash, Py
+     return 1;  // key is present
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_GetItemRef(PyObject *op, PyObject *key, PyObject **result)
+ {
+     if (!PyDict_Check(op)) {
+@@ -2379,7 +2379,7 @@ _PyDict_GetItemRef_Unicode_LockHeld(PyDictObject *op, PyObject *key, PyObject **
+    This returns NULL *with* an exception set if an exception occurred.
+    It returns NULL *without* an exception set if the key wasn't present.
+ */
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDict_GetItemWithError(PyObject *op, PyObject *key)
+ {
+     Py_ssize_t ix; (void)ix;
+@@ -2543,7 +2543,7 @@ setitem_lock_held(PyDictObject *mp, PyObject *key, PyObject *value)
+ }
+ 
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyDict_SetItem_KnownHash_LockHeld(PyDictObject *mp, PyObject *key, PyObject *value,
+                                    Py_hash_t hash)
+ {
+@@ -2891,7 +2891,7 @@ _PyDict_Next(PyObject *op, Py_ssize_t *ppos, PyObject **pkey,
+  * the values associated with the keys (but doesn't insert new keys or
+  * delete keys), via PyDict_SetItem().
+  */
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_Next(PyObject *op, Py_ssize_t *ppos, PyObject **pkey, PyObject **pvalue)
+ {
+     return _PyDict_Next(op, ppos, pkey, pvalue, NULL);
+@@ -2899,7 +2899,7 @@ PyDict_Next(PyObject *op, Py_ssize_t *ppos, PyObject **pkey, PyObject **pvalue)
+ 
+ 
+ /* Internal version of dict.pop(). */
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyDict_Pop_KnownHash(PyDictObject *mp, PyObject *key, Py_hash_t hash,
+                       PyObject **result)
+ {
+@@ -2977,7 +2977,7 @@ pop_lock_held(PyObject *op, PyObject *key, PyObject **result)
+     return _PyDict_Pop_KnownHash(dict, key, hash, result);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_Pop(PyObject *op, PyObject *key, PyObject **result)
+ {
+     int err;
+@@ -2989,7 +2989,7 @@ PyDict_Pop(PyObject *op, PyObject *key, PyObject **result)
+ }
+ 
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_PopString(PyObject *op, const char *key, PyObject **result)
+ {
+     PyObject *key_obj = PyUnicode_FromString(key);
+@@ -3006,7 +3006,7 @@ PyDict_PopString(PyObject *op, const char *key, PyObject **result)
+ }
+ 
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ _PyDict_Pop(PyObject *dict, PyObject *key, PyObject *default_value)
+ {
+     PyObject *result;
+@@ -3072,7 +3072,7 @@ dict_set_fromkeys(PyInterpreterState *interp, PyDictObject *mp,
+ }
+ 
+ /* Internal version of dict.from_keys().  It is subclass-friendly. */
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ _PyDict_FromKeys(PyObject *cls, PyObject *iterable, PyObject *value)
+ {
+     PyObject *it;       /* iter(iterable) */
+@@ -3384,7 +3384,7 @@ keys_lock_held(PyObject *dict)
+     return v;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDict_Keys(PyObject *dict)
+ {
+     PyObject *res;
+@@ -3433,7 +3433,7 @@ values_lock_held(PyObject *dict)
+     return v;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDict_Values(PyObject *dict)
+ {
+     PyObject *res;
+@@ -3496,7 +3496,7 @@ items_lock_held(PyObject *dict)
+     return v;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDict_Items(PyObject *dict)
+ {
+     PyObject *res;
+@@ -3670,7 +3670,7 @@ merge_from_seq2_lock_held(PyObject *d, PyObject *seq2, int override)
+     return Py_SAFE_DOWNCAST(i, Py_ssize_t, int);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_MergeFromSeq2(PyObject *d, PyObject *seq2, int override)
+ {
+     int res;
+@@ -3782,7 +3782,7 @@ dict_dict_merge(PyInterpreterState *interp, PyDictObject *mp, PyDictObject *othe
+     return 0;
+ }
+ 
+-static int
++_Py_P2_INIT_OVERLAY static int
+ dict_merge(PyInterpreterState *interp, PyObject *a, PyObject *b, int override)
+ {
+     PyDictObject *mp, *other;
+@@ -3882,14 +3882,14 @@ dict_merge(PyInterpreterState *interp, PyObject *a, PyObject *b, int override)
+     }
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_Update(PyObject *a, PyObject *b)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+     return dict_merge(interp, a, b, 1);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_Merge(PyObject *a, PyObject *b, int override)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+@@ -4042,7 +4042,7 @@ PyDict_Copy(PyObject *o)
+     return res;
+ }
+ 
+-Py_ssize_t
++_Py_P2_INIT_OVERLAY Py_ssize_t
+ PyDict_Size(PyObject *mp)
+ {
+     if (mp == NULL || !PyDict_Check(mp)) {
+@@ -4334,7 +4334,7 @@ PyDict_SetDefaultRef(PyObject *d, PyObject *key, PyObject *default_value,
+     return res;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDict_SetDefault(PyObject *d, PyObject *key, PyObject *defaultobj)
+ {
+     PyObject *result;
+@@ -4560,7 +4560,7 @@ sizeof_lock_held(PyDictObject *mp)
+     return (Py_ssize_t)res;
+ }
+ 
+-Py_ssize_t
++_Py_P2_INIT_OVERLAY Py_ssize_t
+ _PyDict_SizeOf(PyDictObject *mp)
+ {
+     Py_ssize_t res;
+@@ -4667,7 +4667,7 @@ PyDict_Contains(PyObject *op, PyObject *key)
+     return _PyDict_Contains_KnownHash(op, key, hash);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_ContainsString(PyObject *op, const char *key)
+ {
+     PyObject *key_obj = PyUnicode_FromString(key);
+@@ -4869,7 +4869,7 @@ PyTypeObject PyDict_Type = {
+ 
+ /* For backward compatibility with old dictionary interface */
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyDict_GetItemString(PyObject *v, const char *key)
+ {
+     PyObject *kv, *rv;
+@@ -4887,7 +4887,7 @@ PyDict_GetItemString(PyObject *v, const char *key)
+     return rv;  // borrowed reference
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_GetItemStringRef(PyObject *v, const char *key, PyObject **result)
+ {
+     PyObject *key_obj = PyUnicode_FromString(key);
+@@ -4910,7 +4910,7 @@ _PyDict_SetItemId(PyObject *v, _Py_Identifier *key, PyObject *item)
+     return PyDict_SetItem(v, kv, item);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_SetItemString(PyObject *v, const char *key, PyObject *item)
+ {
+     PyObject *kv;
+@@ -4934,7 +4934,7 @@ _PyDict_DelItemId(PyObject *v, _Py_Identifier *key)
+     return PyDict_DelItem(v, kv);
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_DelItemString(PyObject *v, const char *key)
+ {
+     PyObject *kv;
+@@ -6677,7 +6677,7 @@ _PyObject_InitInlineValues(PyObject *obj, PyTypeObject *tp)
+     _PyObject_ManagedDictPointer(obj)->dict = NULL;
+ }
+ 
+-static PyDictObject *
++_Py_P2_INIT_OVERLAY static PyDictObject *
+ make_dict_from_instance_attributes(PyInterpreterState *interp,
+                                    PyDictKeysObject *keys, PyDictValues *values)
+ {
+@@ -6699,7 +6699,7 @@ make_dict_from_instance_attributes(PyInterpreterState *interp,
+     return res;
+ }
+ 
+-PyDictObject *
++_Py_P2_INIT_OVERLAY PyDictObject *
+ _PyObject_MaterializeManagedDict_LockHeld(PyObject *obj)
+ {
+     ASSERT_WORLD_STOPPED_OR_OBJ_LOCKED(obj);
+@@ -7059,7 +7059,7 @@ _PyObject_IsInstanceDictEmpty(PyObject *obj)
+     return FT_ATOMIC_LOAD_SSIZE_RELAXED(((PyDictObject *)dict)->ma_used) == 0;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyObject_VisitManagedDict(PyObject *obj, visitproc visit, void *arg)
+ {
+     PyTypeObject *tp = Py_TYPE(obj);
+@@ -7097,7 +7097,7 @@ set_dict_inline_values(PyObject *obj, PyDictObject *new_dict)
+     }
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyObject_SetManagedDict(PyObject *obj, PyObject *new_dict)
+ {
+     assert(Py_TYPE(obj)->tp_flags & Py_TPFLAGS_MANAGED_DICT);
+@@ -7160,7 +7160,7 @@ _PyObject_SetManagedDict(PyObject *obj, PyObject *new_dict)
+     return err;
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ PyObject_ClearManagedDict(PyObject *obj)
+ {
+     if (_PyObject_SetManagedDict(obj, NULL) < 0) {
+@@ -7168,7 +7168,7 @@ PyObject_ClearManagedDict(PyObject *obj)
+     }
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ _PyDict_DetachFromObject(PyDictObject *mp, PyObject *obj)
+ {
+     ASSERT_WORLD_STOPPED_OR_OBJ_LOCKED(obj);
+@@ -7272,7 +7272,7 @@ ensure_nonmanaged_dict(PyObject *obj, PyObject **dictptr)
+     return dict;
+ }
+ 
+-PyObject *
++_Py_P2_INIT_OVERLAY PyObject *
+ PyObject_GenericGetDict(PyObject *obj, void *context)
+ {
+     PyTypeObject *tp = Py_TYPE(obj);
+@@ -7311,14 +7311,15 @@ _PyObjectDict_SetItem(PyTypeObject *tp, PyObject *obj, PyObject **dictptr,
+     return res;
+ }
+ 
+-void
++_Py_P2_INIT_OVERLAY void
+ _PyDictKeys_DecRef(PyDictKeysObject *keys)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+     dictkeys_decref(interp, keys, false);
+ }
+ 
+-uint32_t _PyDictKeys_GetVersionForCurrentState(PyInterpreterState *interp,
++_Py_P2_INIT_OVERLAY uint32_t
++_PyDictKeys_GetVersionForCurrentState(PyInterpreterState *interp,
+                                                PyDictKeysObject *dictkeys)
+ {
+     if (dictkeys->dk_version != 0) {
+@@ -7346,7 +7347,7 @@ validate_watcher_id(PyInterpreterState *interp, int watcher_id)
+     return 0;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_Watch(int watcher_id, PyObject* dict)
+ {
+     if (!PyDict_Check(dict)) {
+@@ -7361,7 +7362,7 @@ PyDict_Watch(int watcher_id, PyObject* dict)
+     return 0;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_Unwatch(int watcher_id, PyObject* dict)
+ {
+     if (!PyDict_Check(dict)) {
+@@ -7376,7 +7377,7 @@ PyDict_Unwatch(int watcher_id, PyObject* dict)
+     return 0;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_AddWatcher(PyDict_WatchCallback callback)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+@@ -7393,7 +7394,7 @@ PyDict_AddWatcher(PyDict_WatchCallback callback)
+     return -1;
+ }
+ 
+-int
++_Py_P2_INIT_OVERLAY int
+ PyDict_ClearWatcher(int watcher_id)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+@@ -7416,6 +7417,25 @@ dict_event_name(PyDict_WatchEvent event) {
+     Py_UNREACHABLE();
+ }
+ 
++#if defined(__NuttX__) && defined(__propeller2__)
++_Py_P2_INIT_OVERLAY uint64_t
++_PyDict_NotifyEvent(PyInterpreterState *interp,
++                    PyDict_WatchEvent event,
++                    PyDictObject *mp,
++                    PyObject *key,
++                    PyObject *value)
++{
++    assert(Py_REFCNT((PyObject *)mp) > 0);
++    int watcher_bits = mp->ma_version_tag & DICT_WATCHER_MASK;
++    if (watcher_bits) {
++        RARE_EVENT_STAT_INC(watched_dict_modification);
++        _PyDict_SendEvent(watcher_bits, event, mp, key, value);
++    }
++    return DICT_NEXT_VERSION(interp) |
++           (mp->ma_version_tag & DICT_WATCHER_AND_MODIFICATION_MASK);
++}
++#endif
++
+ _Py_P2_INIT_OVERLAY void
+ _PyDict_SendEvent(int watcher_bits,
+                   PyDict_WatchEvent event,
+diff --git a/Objects/object.c b/Objects/object.c
+index 98e7d22..feaddb3 100644
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -2422,7 +2422,7 @@ new_reference(PyObject *op)
+     }
+ }
+ 
+-_Py_P2_INIT_OVERLAY void
++_Py_P2_HUB_RESIDENT void
+ _Py_NewReference(PyObject *op)
+ {
+ #ifdef Py_REF_DEBUG
+diff --git a/Python/gc.c b/Python/gc.c
+index ecdd2d6..6408d21 100644
+--- a/Python/gc.c
++++ b/Python/gc.c
+@@ -1790,7 +1790,7 @@ PyObject_GC_UnTrack(void *op_raw)
+     }
+ }
+ 
+-_Py_P2_INIT_OVERLAY int
++_Py_P2_HUB_RESIDENT int
+ PyObject_IS_GC(PyObject *obj)
+ {
+     return _PyObject_IS_GC(obj);
+-- 
+2.54.0

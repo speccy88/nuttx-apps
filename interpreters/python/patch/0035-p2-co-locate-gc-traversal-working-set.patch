@@ -1,0 +1,209 @@
+From 87983f33ac4a050cb8b0a3de8619acfd7c868a9c Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 14:15:00 -0400
+Subject: [PATCH] p2: co-locate GC traversal working set
+
+Live startup telemetry entered a cyclic-GC scan with deletions fixed at
+0x1ea6d while overlay entries and cross-group entries advanced together.
+The loader performed 44,324 loads in 928.4 seconds (47.74 loads/second).
+The sampled callbacks were visit_decref and visit_reachable; their callers
+were dominated by dict, tuple, set, descriptor, method, and weak-reference
+traversal groups.  type_is_gc was another repeated transition from both GC
+callbacks and descriptor traversal.
+
+Give the three cyclic-GC visitors and the minimum common built-in traversal
+working set a dedicated group 8.  List, type, subtype, and module traversal
+complete the core container set even though the five-second sampler did not
+land on every one of them.  The exact linked bodies measured before this
+change total 3,320 bytes.  With the four-byte group header, group 8 is
+projected to occupy 3,324 of the 90,112-byte slot, leaving 86,788 bytes.
+The post-link residency verifier remains the hard authority for fit.
+---
+ Include/pyport.h        |  2 ++
+ Objects/descrobject.c   |  2 +-
+ Objects/dictobject.c    |  2 +-
+ Objects/listobject.c    |  2 +-
+ Objects/methodobject.c  |  2 +-
+ Objects/moduleobject.c  |  2 +-
+ Objects/setobject.c     |  2 +-
+ Objects/tupleobject.c   |  2 +-
+ Objects/typeobject.c    |  6 +++---
+ Objects/weakrefobject.c |  2 +-
+ Python/gc.c             |  6 +++---
+ 11 files changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/Include/pyport.h b/Include/pyport.h
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -5,10 +5,12 @@
+ #if defined(__NuttX__) && defined(__propeller2__)
+ #  define _Py_P2_HUB_RESIDENT __attribute__((p2_hub_resident))
+ #  define _Py_P2_INIT_OVERLAY __attribute__((p2_hub_overlay(7)))
++#  define _Py_P2_GC_OVERLAY __attribute__((p2_hub_overlay(8)))
+ #  define _Py_P2_UTF8_OVERLAY __attribute__((p2_hub_overlay(6)))
+ #else
+ #  define _Py_P2_HUB_RESIDENT
+ #  define _Py_P2_INIT_OVERLAY
++#  define _Py_P2_GC_OVERLAY
+ #  define _Py_P2_UTF8_OVERLAY
+ #endif
+ 
+diff --git a/Objects/descrobject.c b/Objects/descrobject.c
+--- a/Objects/descrobject.c
++++ b/Objects/descrobject.c
+@@ -705,7 +705,7 @@ static PyGetSetDef wrapperdescr_getset[] = {
+     {0}
+ };
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ descr_traverse(PyObject *self, visitproc visit, void *arg)
+ {
+     PyDescrObject *descr = (PyDescrObject *)self;
+diff --git a/Objects/dictobject.c b/Objects/dictobject.c
+--- a/Objects/dictobject.c
++++ b/Objects/dictobject.c
+@@ -4501,7 +4501,7 @@ dict_popitem_impl(PyDictObject *self)
+     return res;
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ dict_traverse(PyObject *op, visitproc visit, void *arg)
+ {
+     PyDictObject *mp = (PyDictObject *)op;
+diff --git a/Objects/listobject.c b/Objects/listobject.c
+--- a/Objects/listobject.c
++++ b/Objects/listobject.c
+@@ -3318,7 +3318,7 @@ list_remove_impl(PyListObject *self, PyObject *value)
+     return NULL;
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ list_traverse(PyObject *self, visitproc visit, void *arg)
+ {
+     PyListObject *o = (PyListObject *)self;
+diff --git a/Objects/methodobject.c b/Objects/methodobject.c
+--- a/Objects/methodobject.c
++++ b/Objects/methodobject.c
+@@ -243,7 +243,7 @@ meth_get__qualname__(PyCFunctionObject *m, void *closure)
+     return res;
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ meth_traverse(PyCFunctionObject *m, visitproc visit, void *arg)
+ {
+     Py_VISIT(PyCFunction_GET_CLASS(m));
+diff --git a/Objects/moduleobject.c b/Objects/moduleobject.c
+--- a/Objects/moduleobject.c
++++ b/Objects/moduleobject.c
+@@ -1066,7 +1066,7 @@ _Py_module_getattro(PyModuleObject *m, PyObject *name)
+     return _Py_module_getattro_impl(m, name, 0);
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ module_traverse(PyModuleObject *m, visitproc visit, void *arg)
+ {
+     /* bpo-39824: Don't call m_traverse() if m_size > 0 and md_state=NULL */
+diff --git a/Objects/setobject.c b/Objects/setobject.c
+--- a/Objects/setobject.c
++++ b/Objects/setobject.c
+@@ -683,7 +683,7 @@ set_pop_impl(PySetObject *so)
+     return key;
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ set_traverse(PySetObject *so, visitproc visit, void *arg)
+ {
+     Py_ssize_t pos = 0;
+diff --git a/Objects/tupleobject.c b/Objects/tupleobject.c
+--- a/Objects/tupleobject.c
++++ b/Objects/tupleobject.c
+@@ -601,7 +601,7 @@ tuple_count(PyTupleObject *self, PyObject *value)
+     return PyLong_FromSsize_t(count);
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ tupletraverse(PyTupleObject *o, visitproc visit, void *arg)
+ {
+     Py_ssize_t i;
+diff --git a/Objects/typeobject.c b/Objects/typeobject.c
+--- a/Objects/typeobject.c
++++ b/Objects/typeobject.c
+@@ -2116,7 +2116,7 @@ traverse_slots(PyTypeObject *type, PyObject *self,
+     return 0;
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ subtype_traverse(PyObject *self, visitproc visit, void *arg)
+ {
+     PyTypeObject *type, *base;
+@@ -5898,7 +5898,7 @@ PyDoc_STRVAR(type_doc,
+ "type(object) -> the object's type\n"
+ "type(name, bases, dict, **kwds) -> new type");
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ type_traverse(PyObject *self, visitproc visit, void *arg)
+ {
+     PyTypeObject *type = (PyTypeObject *)self;
+@@ -5979,7 +5979,7 @@ type_clear(PyObject *self)
+     return 0;
+ }
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ type_is_gc(PyObject *type)
+ {
+     return ((PyTypeObject *)type)->tp_flags & Py_TPFLAGS_HEAPTYPE;
+diff --git a/Objects/weakrefobject.c b/Objects/weakrefobject.c
+--- a/Objects/weakrefobject.c
++++ b/Objects/weakrefobject.c
+@@ -143,7 +143,7 @@ weakref_dealloc(PyObject *self)
+ }
+ 
+ 
+-static int
++_Py_P2_GC_OVERLAY static int
+ gc_traverse(PyWeakReference *self, visitproc visit, void *arg)
+ {
+     Py_VISIT(self->wr_callback);
+diff --git a/Python/gc.c b/Python/gc.c
+--- a/Python/gc.c
++++ b/Python/gc.c
+@@ -429,7 +429,7 @@ update_refs(PyGC_Head *containers)
+ }
+ 
+ /* A traversal callback for subtract_refs. */
+-static int
++_Py_P2_GC_OVERLAY static int
+ visit_decref(PyObject *op, void *parent)
+ {
+     OBJECT_STAT_INC(object_visits);
+@@ -463,7 +463,7 @@ subtract_refs(PyGC_Head *containers)
+ }
+ 
+ /* A traversal callback for move_unreachable. */
+-static int
++_Py_P2_GC_OVERLAY static int
+ visit_reachable(PyObject *op, void *arg)
+ {
+     PyGC_Head *reachable = arg;
+@@ -703,7 +703,7 @@ clear_unreachable_mask(PyGC_Head *unreachable)
+ }
+ 
+ /* A traversal callback for move_legacy_finalizer_reachable. */
+-static int
++_Py_P2_GC_OVERLAY static int
+ visit_move(PyObject *op, void *arg)
+ {
+     PyGC_Head *tolist = arg;
+-- 
+2.50.1
+

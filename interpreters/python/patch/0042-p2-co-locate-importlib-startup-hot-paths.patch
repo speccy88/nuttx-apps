@@ -1,0 +1,260 @@
+From c52dca73944d32d4ca1d63299736661402de3e02 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 19 Jul 2026 23:58:00 -0400
+Subject: [PATCH] p2: co-locate importlib startup hot paths
+
+Hardware samples in the frozen-importlib phase found two dominant
+cross-group loops.  typeobject.c's automatic group 132 repeatedly called
+the group-7 slotptr and dictionary lookup paths from update_one_slot, while
+codeobject.c's automatic group F3 repeatedly entered group-7 interning from
+intern_constants.  Put both measured callers in group 7.
+
+The rich-equality chain also crossed the automatic object and Unicode
+groups.  Give the four measured comparison bodies a small explicit group 10
+and return a new reference to the Boolean singleton directly instead of
+leaving that path for PyBool_FromLong.
+
+Keep the nearly-full initialization group within its 90,112-byte slot by
+evicting five cold dictionary API bodies.  Their previous linked bodies
+totalled 1,640 bytes, and moving the 296-byte unicode_compare_eq body to
+group 10 frees 1,936 bytes.  update_one_slot and intern_constants total
+1,940 bytes, so the measured 89,836-byte group 7 is predicted to grow by
+only four bytes to 89,840 bytes, leaving 272 bytes.  The previous comparison
+bodies plus a group header form a 2,364-byte upper bound for group 10 before
+the direct-singleton simplification.  The post-link residency verifier
+remains the authority for exact fit and membership.
+---
+ Include/cpython/dictobject.h | 11 ++++-------
+ Include/dictobject.h         |  2 +-
+ Include/object.h             |  6 ++++--
+ Include/pyport.h             |  2 ++
+ Include/unicodeobject.h      |  2 +-
+ Objects/codeobject.c         |  2 +-
+ Objects/dictobject.c         | 10 +++++-----
+ Objects/object.c             |  4 ++--
+ Objects/typeobject.c         |  2 +-
+ Objects/unicodeobject.c      |  8 ++++----
+ 10 files changed, 25 insertions(+), 24 deletions(-)
+
+diff --git a/Include/cpython/dictobject.h b/Include/cpython/dictobject.h
+index 4e2358c..619dba6 100644
+--- a/Include/cpython/dictobject.h
++++ b/Include/cpython/dictobject.h
+@@ -99,12 +99,9 @@ typedef enum {
+ typedef int(*PyDict_WatchCallback)(PyDict_WatchEvent event, PyObject* dict, PyObject* key, PyObject* new_value);
+ 
+ // Register/unregister a dict-watcher callback
+-PyAPI_FUNC(int) PyDict_AddWatcher(PyDict_WatchCallback callback)
+-    _Py_P2_INIT_OVERLAY;
+-PyAPI_FUNC(int) PyDict_ClearWatcher(int watcher_id) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyDict_AddWatcher(PyDict_WatchCallback callback);
++PyAPI_FUNC(int) PyDict_ClearWatcher(int watcher_id);
+ 
+ // Mark given dictionary as "watched" (callback will be called if it is modified)
+-PyAPI_FUNC(int) PyDict_Watch(int watcher_id, PyObject* dict)
+-    _Py_P2_INIT_OVERLAY;
+-PyAPI_FUNC(int) PyDict_Unwatch(int watcher_id, PyObject* dict)
+-    _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(int) PyDict_Watch(int watcher_id, PyObject* dict);
++PyAPI_FUNC(int) PyDict_Unwatch(int watcher_id, PyObject* dict);
+diff --git a/Include/dictobject.h b/Include/dictobject.h
+index aa40ac6..883df5e 100644
+--- a/Include/dictobject.h
++++ b/Include/dictobject.h
+@@ -31,7 +31,7 @@ PyAPI_FUNC(int) PyDict_Next(
+     _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyDict_Keys(PyObject *mp) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyDict_Values(PyObject *mp) _Py_P2_INIT_OVERLAY;
+-PyAPI_FUNC(PyObject *) PyDict_Items(PyObject *mp) _Py_P2_INIT_OVERLAY;
++PyAPI_FUNC(PyObject *) PyDict_Items(PyObject *mp);
+ PyAPI_FUNC(Py_ssize_t) PyDict_Size(PyObject *mp) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyDict_Copy(PyObject *mp);
+ PyAPI_FUNC(int) PyDict_Contains(PyObject *mp, PyObject *key) _Py_P2_INIT_OVERLAY;
+diff --git a/Include/object.h b/Include/object.h
+index fbe9b9b..e81a728 100644
+--- a/Include/object.h
++++ b/Include/object.h
+@@ -563,8 +563,10 @@ PyAPI_FUNC(PyObject *) PyObject_Repr(PyObject *);
+ PyAPI_FUNC(PyObject *) PyObject_Str(PyObject *);
+ PyAPI_FUNC(PyObject *) PyObject_ASCII(PyObject *);
+ PyAPI_FUNC(PyObject *) PyObject_Bytes(PyObject *);
+-PyAPI_FUNC(PyObject *) PyObject_RichCompare(PyObject *, PyObject *, int);
+-PyAPI_FUNC(int) PyObject_RichCompareBool(PyObject *, PyObject *, int);
++PyAPI_FUNC(PyObject *) PyObject_RichCompare(PyObject *, PyObject *, int)
++    _Py_P2_COMPARE_OVERLAY;
++PyAPI_FUNC(int) PyObject_RichCompareBool(PyObject *, PyObject *, int)
++    _Py_P2_COMPARE_OVERLAY;
+ PyAPI_FUNC(PyObject *) PyObject_GetAttrString(PyObject *, const char *);
+ PyAPI_FUNC(int) PyObject_SetAttrString(PyObject *, const char *, PyObject *) _Py_P2_INIT_OVERLAY;
+ PyAPI_FUNC(int) PyObject_DelAttrString(PyObject *v, const char *name);
+diff --git a/Include/pyport.h b/Include/pyport.h
+index c11f18f..9a816c5 100644
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -6,12 +6,14 @@
+ #  define _Py_P2_INIT_OVERLAY __attribute__((p2_hub_overlay(7)))
+ #  define _Py_P2_GC_OVERLAY __attribute__((p2_hub_overlay(8)))
+ #  define _Py_P2_CODEINIT_OVERLAY __attribute__((p2_hub_overlay(9)))
++#  define _Py_P2_COMPARE_OVERLAY __attribute__((p2_hub_overlay(10)))
+ #  define _Py_P2_UTF8_OVERLAY __attribute__((p2_hub_overlay(6)))
+ #else
+ #  define _Py_P2_HUB_RESIDENT
+ #  define _Py_P2_INIT_OVERLAY
+ #  define _Py_P2_GC_OVERLAY
+ #  define _Py_P2_CODEINIT_OVERLAY
++#  define _Py_P2_COMPARE_OVERLAY
+ #  define _Py_P2_UTF8_OVERLAY
+ #endif
+ 
+diff --git a/Include/unicodeobject.h b/Include/unicodeobject.h
+index 1332d57..b63cd6f 100644
+--- a/Include/unicodeobject.h
++++ b/Include/unicodeobject.h
+@@ -982,7 +982,7 @@ PyAPI_FUNC(PyObject *) PyUnicode_RichCompare(
+     PyObject *left,             /* Left string */
+     PyObject *right,            /* Right string */
+     int op                      /* Operation: Py_EQ, Py_NE, Py_GT, etc. */
+-    );
++    ) _Py_P2_COMPARE_OVERLAY;
+ 
+ /* Apply an argument tuple or dictionary to a format string and return
+    the resulting Unicode string. */
+diff --git a/Objects/codeobject.c b/Objects/codeobject.c
+index ca4d047..af8a3a8 100644
+--- a/Objects/codeobject.c
++++ b/Objects/codeobject.c
+@@ -155,7 +155,7 @@ intern_strings(PyObject *tuple)
+ /* Intern constants. In the default build, this interns selected string
+    constants. In the free-threaded build, this also interns non-string
+    constants. */
+-static int
++_Py_P2_INIT_OVERLAY static int
+ intern_constants(PyObject *tuple, int *modified)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+diff --git a/Objects/dictobject.c b/Objects/dictobject.c
+index 3969cd6..b54104e 100644
+--- a/Objects/dictobject.c
++++ b/Objects/dictobject.c
+@@ -3496,7 +3496,7 @@ items_lock_held(PyObject *dict)
+     return v;
+ }
+ 
+-_Py_P2_INIT_OVERLAY PyObject *
++PyObject *
+ PyDict_Items(PyObject *dict)
+ {
+     PyObject *res;
+@@ -7347,7 +7347,7 @@ validate_watcher_id(PyInterpreterState *interp, int watcher_id)
+     return 0;
+ }
+ 
+-_Py_P2_INIT_OVERLAY int
++int
+ PyDict_Watch(int watcher_id, PyObject* dict)
+ {
+     if (!PyDict_Check(dict)) {
+@@ -7362,7 +7362,7 @@ PyDict_Watch(int watcher_id, PyObject* dict)
+     return 0;
+ }
+ 
+-_Py_P2_INIT_OVERLAY int
++int
+ PyDict_Unwatch(int watcher_id, PyObject* dict)
+ {
+     if (!PyDict_Check(dict)) {
+@@ -7377,7 +7377,7 @@ PyDict_Unwatch(int watcher_id, PyObject* dict)
+     return 0;
+ }
+ 
+-_Py_P2_INIT_OVERLAY int
++int
+ PyDict_AddWatcher(PyDict_WatchCallback callback)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+@@ -7394,7 +7394,7 @@ PyDict_AddWatcher(PyDict_WatchCallback callback)
+     return -1;
+ }
+ 
+-_Py_P2_INIT_OVERLAY int
++int
+ PyDict_ClearWatcher(int watcher_id)
+ {
+     PyInterpreterState *interp = _PyInterpreterState_GET();
+diff --git a/Objects/object.c b/Objects/object.c
+index 2f7cf04..8920659 100644
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -969,7 +969,7 @@ do_richcompare(PyThreadState *tstate, PyObject *v, PyObject *w, int op)
+ /* Perform a rich comparison with object result.  This wraps do_richcompare()
+    with a check for NULL arguments and a recursion check. */
+ 
+-PyObject *
++_Py_P2_COMPARE_OVERLAY PyObject *
+ PyObject_RichCompare(PyObject *v, PyObject *w, int op)
+ {
+     PyThreadState *tstate = _PyThreadState_GET();
+@@ -991,7 +991,7 @@ PyObject_RichCompare(PyObject *v, PyObject *w, int op)
+ 
+ /* Perform a rich comparison with integer result.  This wraps
+    PyObject_RichCompare(), returning -1 for error, 0 for false, 1 for true. */
+-int
++_Py_P2_COMPARE_OVERLAY int
+ PyObject_RichCompareBool(PyObject *v, PyObject *w, int op)
+ {
+     PyObject *res;
+diff --git a/Objects/typeobject.c b/Objects/typeobject.c
+index f83ca2d..3396180 100644
+--- a/Objects/typeobject.c
++++ b/Objects/typeobject.c
+@@ -10541,7 +10541,7 @@ resolve_slotdups(PyTypeObject *type, PyObject *name)
+  * When done, return a pointer to the next slotdef with a different offset,
+  * because that's convenient for fixup_slot_dispatchers(). This function never
+  * sets an exception: if an internal error happens (unlikely), it's ignored. */
+-static pytype_slotdef *
++_Py_P2_INIT_OVERLAY static pytype_slotdef *
+ update_one_slot(PyTypeObject *type, pytype_slotdef *p)
+ {
+     ASSERT_TYPE_LOCK_HELD();
+diff --git a/Objects/unicodeobject.c b/Objects/unicodeobject.c
+index 8d8e0ef..04ad448 100644
+--- a/Objects/unicodeobject.c
++++ b/Objects/unicodeobject.c
+@@ -256,7 +256,7 @@ _PyUnicode_InternedSize_Immortal(void)
+ }
+ 
+ _Py_P2_INIT_OVERLAY static Py_hash_t unicode_hash(PyObject *);
+-_Py_P2_INIT_OVERLAY static int unicode_compare_eq(PyObject *, PyObject *);
++_Py_P2_COMPARE_OVERLAY static int unicode_compare_eq(PyObject *, PyObject *);
+ 
+ _Py_P2_INIT_OVERLAY static Py_uhash_t
+ hashtable_unicode_hash(const void *key)
+@@ -10758,7 +10758,7 @@ unicode_compare(PyObject *str1, PyObject *str2)
+ #undef COMPARE
+ }
+ 
+-_Py_P2_INIT_OVERLAY static int
++_Py_P2_COMPARE_OVERLAY static int
+ unicode_compare_eq(PyObject *str1, PyObject *str2)
+ {
+     int kind;
+@@ -10988,7 +10988,7 @@ _PyUnicode_EqualToASCIIId(PyObject *left, _Py_Identifier *right)
+     return unicode_compare_eq(left, right_uni);
+ }
+ 
+-PyObject *
++_Py_P2_COMPARE_OVERLAY PyObject *
+ PyUnicode_RichCompare(PyObject *left, PyObject *right, int op)
+ {
+     int result;
+@@ -11015,7 +11015,7 @@ PyUnicode_RichCompare(PyObject *left, PyObject *right, int op)
+     else if (op == Py_EQ || op == Py_NE) {
+         result = unicode_compare_eq(left, right);
+         result ^= (op == Py_NE);
+-        return PyBool_FromLong(result);
++        return Py_NewRef(result ? Py_True : Py_False);
+     }
+     else {
+         result = unicode_compare(left, right);
+-- 
+2.50.1

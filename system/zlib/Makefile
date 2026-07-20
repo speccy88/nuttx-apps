@@ -44,7 +44,10 @@ P2_ZLIB_OVERLAY_SLOT_ADDRESS=$(shell printf '0x%x' \
 	$$((0x7c000 - $(CONFIG_P2_HUB_OVERLAY_SLOT_SIZE))))
 CFLAGS += -mllvm -p2-hub-overlays
 CFLAGS += -mllvm -p2-hub-overlays-all
-CFLAGS += -mllvm -p2-hub-overlay-auto-groups=$(CONFIG_P2_HUB_OVERLAY_GROUP_COUNT)
+CFLAGS += -mllvm -p2-hub-overlay-link-assigned
+CFLAGS += -mllvm -p2-hub-overlay-source-root=$(abspath $(CURDIR))
+CFLAGS += -mllvm -p2-hub-overlay-source-namespace=zlib
+CFLAGS += -mllvm -p2-hub-overlay-source-variant=1.3-nuttx-p2
 CFLAGS += -mllvm -p2-hub-overlay-slot-address=$(P2_ZLIB_OVERLAY_SLOT_ADDRESS)
 CFLAGS += -mllvm -p2-externalize-data
 endif
